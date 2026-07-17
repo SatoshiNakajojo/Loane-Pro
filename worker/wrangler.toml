@@ -1,0 +1,11 @@
+name = "studio-vocal-auth"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+[vars]
+# Remplace par l'URL exacte de ton site GitHub Pages (sans / final)
+ALLOWED_ORIGIN = "https://TON-COMPTE.github.io"
+
+# Secrets à ajouter en ligne de commande (ne jamais les mettre ici) :
+#   npx wrangler secret put GOOGLE_CLIENT_ID
+#   npx wrangler secret put GOOGLE_CLIENT_SECRET

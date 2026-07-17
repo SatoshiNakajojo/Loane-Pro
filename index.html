@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Studio Vocal</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Studio Vocal">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#241E33">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <h1 id="page-title">Agenda</h1>
+  <button id="topbar-action" class="btn-icon" hidden>＋</button>
+</header>
+
+<main id="view"></main>
+
+<nav class="tabbar">
+  <button class="tab active" data-tab="agenda"><span class="tab-ico">📅</span>Agenda</button>
+  <button class="tab" data-tab="students"><span class="tab-ico">🎤</span>Élèves</button>
+  <button class="tab" data-tab="billing"><span class="tab-ico">🧾</span>Factures</button>
+  <button class="tab" data-tab="library"><span class="tab-ico">🎼</span>Répertoire</button>
+  <button class="tab" data-tab="settings"><span class="tab-ico">⚙️</span>Réglages</button>
+</nav>
+
+<div id="sheet-backdrop" hidden></div>
+<div id="sheet" class="sheet" hidden></div>
+<div id="toast" hidden></div>
+
+<script src="js/config.js"></script>
+<script src="js/db.js"></script>
+<script src="js/app.js"></script>
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
