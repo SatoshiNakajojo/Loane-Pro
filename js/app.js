@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.7.0';
+const APP_VERSION = '2.8.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -231,6 +231,44 @@ const Cloud = {
   }
 };
 
+// --- Sauvegarde automatique déclenchée par toute écriture ---
+Cloud.pending = false;
+Cloud.timer = null;
+Cloud.schedule = function () {
+  if (!WORKER_URL || !this.pass) return;      // cloud non configuré : on ne fait rien
+  this.pending = true;
+  cloudBadge('en attente');
+  clearTimeout(this.timer);
+  this.timer = setTimeout(async () => {
+    cloudBadge('envoi');
+    const ok = await this.backup(true);
+    this.pending = !ok;
+    cloudBadge(ok ? 'ok' : 'erreur');
+    if (!ok) setTimeout(() => this.schedule(), 60000);   // nouvelle tentative dans 1 min
+  }, 3500);
+};
+
+// petit témoin discret dans la barre du haut
+function cloudBadge(etat) {
+  const el = document.getElementById('cloud-state');
+  if (!el) return;
+  const t = { 'en attente': '☁︎', 'envoi': '☁︎…', 'ok': '☁︎✓', 'erreur': '☁︎!' }[etat] || '';
+  el.textContent = t;
+  el.className = 'cloud-state ' + (etat === 'erreur' ? 'err' : etat === 'ok' ? 'ok' : 'wait');
+  el.hidden = false;
+  if (etat === 'ok') setTimeout(() => { el.hidden = true; }, 2500);
+}
+
+// On enrobe les écritures de la base pour déclencher la sauvegarde
+['put', 'del', 'setSetting', 'importAll'].forEach(m => {
+  const orig = DB[m].bind(DB);
+  DB[m] = async function (...args) {
+    const r = await orig(...args);
+    Cloud.schedule();
+    return r;
+  };
+});
+
 // ====== Utilitaires métier ======
 async function lessonsOf(studentId) {
   const ls = await DB.byStudent('lessons', studentId);
@@ -276,6 +314,7 @@ const TABS = {
 };
 document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 function switchTab(tab) {
+  if (tab !== 'settings') settingsPage = null;
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   const t = TABS[tab];
@@ -1171,37 +1210,52 @@ async function sheetPiece(id) {
 }
 
 // ====== RÉGLAGES ======
+const STORES = [
+  { key: 'students', label: 'Élèves', sum: r => r.name },
+  { key: 'lessons', label: 'Séances', sum: r => `${fmtDateFull(r.date)} · ${(KINDS[r.kind || 'cours'] || {}).label || ''}` },
+  { key: 'payments', label: 'Paiements', sum: r => `${fmtMoney(r.amount)} · ${fmtDateFull(r.date)}` },
+  { key: 'notes', label: 'Notes de cours', sum: r => `${fmtDateFull(r.date)} · ${(r.text || '').slice(0, 40)}` },
+  { key: 'invoices', label: 'Factures & devis', sum: r => `${r.kind === 'devis' ? 'Devis' : 'Facture'} ${r.number} · ${fmtMoney(r.total)}` },
+  { key: 'library', label: 'Répertoire', sum: r => r.title },
+  { key: 'settings', label: 'Réglages', sum: r => r.id }
+];
+
+let settingsPage = null;   // null = accueil des réglages
+let cloudSnapshot = null;  // dernier contenu lu depuis le cloud
+
 async function renderSettings() {
-  const { courseTypes, forfaits, business } = await getConfig();
-  const delays = [[0, 'Immédiat'], [60000, '1 minute'], [300000, '5 minutes'], [900000, '15 minutes'], [3600000, '1 heure'], [-1, 'Jamais']];
-  view.innerHTML = `
-    <h2 class="section">Verrouillage</h2>
-    <div class="card">
-      ${Lock.enabled ? '<span class="badge ok">Code actif</span>' : '<span class="badge warn">Aucun code</span>'}
-      <label class="field" style="margin-top:10px"><span>Verrouiller après</span>
-        <select id="lk-delay">${delays.map(([v, t]) => `<option value="${v}" ${Lock.delay === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
-      <button class="btn secondary" id="lk-set">${Lock.enabled ? 'Changer le code' : 'Définir un code à 4 chiffres'}</button>
-      ${Lock.enabled ? '<button class="btn danger" id="lk-off">Désactiver le code</button>' : ''}
-    </div>
+  if (settingsPage === 'profil') return settingsProfil();
+  if (settingsPage === 'tarifs') return settingsTarifs();
+  if (settingsPage === 'google') return settingsGoogle();
+  if (settingsPage === 'data') return settingsData();
+  if (settingsPage === 'securite') return settingsSecurite();
+  if (settingsPage === 'apropos') return settingsApropos();
 
-    <h2 class="section">Google Agenda</h2>
-    <div class="card">
-      ${GC.connected ? `<span class="badge ok">Connecté</span><button class="btn danger" id="gc-off">Déconnecter</button>`
-      : WORKER_URL ? `<div class="sub">Connecte le compte Google pour synchroniser les cours.</div><button class="btn" id="gc-on">Connecter Google Agenda</button>`
-        : `<div class="sub">Renseigne WORKER_URL dans js/config.js.</div>`}
-    </div>
+  const cats = [
+    ['profil', '🏷️', 'Profil & facturation', 'Coordonnées, monnaie, mentions'],
+    ['tarifs', '💶', 'Cours, forfaits & encaissement', 'Types de cours, tarifs, qui encaisse'],
+    ['google', '📅', 'Google Agenda', GC.connected ? 'Connecté' : 'Non connecté'],
+    ['data', '☁️', 'Données & sauvegarde', Cloud.lastBackup ? 'Dernière sauvegarde : ' + new Date(Cloud.lastBackup).toLocaleString('fr-FR') : 'Sauvegarde cloud à configurer'],
+    ['securite', '🔒', 'Sécurité', Lock.enabled ? 'Code actif' : 'Aucun code'],
+    ['apropos', 'ℹ️', 'À propos', 'Version ' + APP_VERSION]
+  ];
+  view.innerHTML = cats.map(([k, ico, t, sub]) => `<button class="cat" data-cat="${k}">
+      <span class="cat-ico">${ico}</span>
+      <span class="grow"><span class="title">${t}</span><div class="sub">${esc(sub)}</div></span>
+      <span class="chev">›</span></button>`).join('');
+  view.querySelectorAll('[data-cat]').forEach(b => b.onclick = () => { settingsPage = b.dataset.cat; renderSettings(); });
+}
 
-    <h2 class="section">Sauvegarde cloud ☁️</h2>
-    <div class="card">
-      ${WORKER_URL ? `
-      <div class="sub">Phrase secrète (6 caractères min.) pour protéger et retrouver la sauvegarde. Sauvegarde auto quotidienne.</div>
-      <label class="field" style="margin-top:10px"><span>Phrase secrète</span><input id="cl-pass" type="password" value="${esc(Cloud.pass)}"></label>
-      ${Cloud.lastBackup ? `<div class="sub">Dernière : ${new Date(Cloud.lastBackup).toLocaleString('fr-FR')}</div>` : ''}
-      <button class="btn" id="cl-save">Sauvegarder maintenant</button>
-      <button class="btn secondary" id="cl-restore">Restaurer depuis le cloud</button>` : `<div class="sub">Nécessite le Worker Cloudflare.</div>`}
-    </div>
+function settingsBack(titre) {
+  return `<button class="btn-inline" id="s-back">‹ Réglages</button>
+          <h2 class="section">${titre}</h2>`;
+}
+function bindBack() { $('#s-back').onclick = () => { settingsPage = null; renderSettings(); }; }
 
-    <h2 class="section">Mes informations (factures)</h2>
+// --- Profil & facturation ---
+async function settingsProfil() {
+  const { business } = await getConfig();
+  view.innerHTML = settingsBack('Profil & facturation') + `
     <div class="card">
       <label class="field"><span>Nom</span><input id="b-name" value="${esc(business.name)}"></label>
       <label class="field"><span>Adresse</span><textarea id="b-address">${esc(business.address)}</textarea></label>
@@ -1216,41 +1270,128 @@ async function renderSettings() {
         <option value="XPF" ${CURRENCY === 'XPF' ? 'selected' : ''}>Franc Pacifique (F)</option>
         <option value="EUR" ${CURRENCY === 'EUR' ? 'selected' : ''}>Euro (€)</option></select></label>
       <button class="btn" id="b-save">Enregistrer</button>
-    </div>
-
-    <h2 class="section">Types de cours</h2>
-    <div class="card" id="types-box"></div>
-
-    <h2 class="section">Forfaits & tarifs</h2>
-    <div class="card" id="forfaits-box"></div>
-
-    <h2 class="section">Encaissement</h2>
-    <div class="card" id="collectors-box"></div>
-
-    <h2 class="section">Sauvegarde locale</h2>
-    <div class="card">
-      <button class="btn secondary" id="bk-export">Exporter un fichier (JSON)</button>
-      <input type="file" id="bk-file" accept="application/json" hidden>
-      <button class="btn secondary" id="bk-import">Restaurer un fichier</button>
-    </div>
-
-    <div style="text-align:center;color:var(--ink-soft);font-size:.8rem;margin:22px 0 6px">
-      Loane Pro · version ${APP_VERSION}
     </div>`;
+  bindBack();
+  $('#b-save').onclick = async () => {
+    await DB.setSetting('business', {
+      name: $('#b-name').value, address: $('#b-address').value, siret: $('#b-siret').value,
+      phone: $('#b-phone').value, email: $('#b-email').value, iban: $('#b-iban').value, footer: $('#b-footer').value
+    });
+    CURRENCY = $('#b-cur').value; await DB.setSetting('currency', CURRENCY);
+    toast('Enregistré ✓');
+  };
+}
 
-  $('#lk-delay').onchange = e => { Lock.delay = +e.target.value; toast('Délai enregistré ✓'); };
-  $('#lk-set').onclick = () => sheetSetCode();
-  const lkOff = $('#lk-off'); if (lkOff) lkOff.onclick = () => { localStorage.removeItem('lock_hash'); toast('Code désactivé'); renderSettings(); };
+// --- Cours, forfaits, encaissement ---
+async function settingsTarifs() {
+  view.innerHTML = settingsBack('Types de cours') + `<div class="card" id="types-box"></div>
+    <h2 class="section">Forfaits & tarifs</h2><div class="card" id="forfaits-box"></div>
+    <h2 class="section">Qui encaisse</h2><div class="card" id="collectors-box"></div>`;
+  bindBack();
+  await drawTypes(); await drawForfaits(); await drawCollectors();
+}
 
+// --- Google Agenda ---
+async function settingsGoogle() {
+  view.innerHTML = settingsBack('Google Agenda') + `<div class="card">
+    ${GC.connected ? `<span class="badge ok">Connecté</span>
+        <div class="sub" style="margin-top:8px">Les séances créées ici partent dans l\u2019agenda Google, et ses événements apparaissent dans l\u2019app.</div>
+        <button class="btn danger" id="gc-off">Déconnecter</button>`
+      : WORKER_URL ? `<div class="sub">Connecte le compte Google pour synchroniser les cours.</div>
+        <button class="btn" id="gc-on">Connecter Google Agenda</button>`
+        : `<div class="sub">Renseigne WORKER_URL dans js/config.js.</div>`}
+    </div>`;
+  bindBack();
   const on = $('#gc-on'); if (on) on.onclick = () => GC.connect();
   const off = $('#gc-off'); if (off) off.onclick = () => { GC.disconnect(); renderSettings(); };
+}
+
+// --- Sécurité ---
+async function settingsSecurite() {
+  const delays = [[0, 'Immédiat'], [60000, '1 minute'], [300000, '5 minutes'], [900000, '15 minutes'], [3600000, '1 heure'], [-1, 'Jamais']];
+  view.innerHTML = settingsBack('Verrouillage') + `<div class="card">
+      ${Lock.enabled ? '<span class="badge ok">Code actif</span>' : '<span class="badge warn">Aucun code</span>'}
+      <label class="field" style="margin-top:12px"><span>Verrouiller après</span>
+        <select id="lk-delay">${delays.map(([v, t]) => `<option value="${v}" ${Lock.delay === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <button class="btn secondary" id="lk-set">${Lock.enabled ? 'Changer le code' : 'Définir un code à 4 chiffres'}</button>
+      ${Lock.enabled ? '<button class="btn danger" id="lk-off">Désactiver le code</button>' : ''}
+    </div>`;
+  bindBack();
+  $('#lk-delay').onchange = e => { Lock.delay = +e.target.value; toast('Délai enregistré ✓'); };
+  $('#lk-set').onclick = () => sheetSetCode();
+  const off = $('#lk-off'); if (off) off.onclick = () => { localStorage.removeItem('lock_hash'); toast('Code désactivé'); renderSettings(); };
+}
+
+// --- À propos ---
+async function settingsApropos() {
+  view.innerHTML = settingsBack('À propos') + `<div class="card" style="text-align:center">
+      <img src="icons/bird.png" alt="" style="width:78px;margin:6px auto 10px;display:block">
+      <div class="title" style="font-family:var(--serif);font-size:1.2rem">Loane Pro</div>
+      <div class="sub">Version ${APP_VERSION}</div>
+      <hr class="staff">
+      <div class="sub">Agenda, élèves, heures effectuées, factures et répertoire.<br>
+      Données stockées sur l\u2019appareil et sauvegardées dans le cloud.</div>
+    </div>`;
+  bindBack();
+}
+
+// --- Données & sauvegarde ---
+async function settingsData() {
+  const locales = {};
+  for (const st of STORES) locales[st.key] = (await DB.all(st.key)).length;
+
+  const lignes = STORES.map(st => {
+    const loc = locales[st.key];
+    const dist = cloudSnapshot ? (cloudSnapshot[st.key] || []).length : null;
+    const etat = dist === null ? '<span class="sub">—</span>'
+      : dist === loc ? '<span class="egal">=</span>'
+        : `<span class="ecart">${dist > loc ? '+' : ''}${dist - loc}</span>`;
+    return `<tr class="tap" data-store="${st.key}">
+        <td>${st.label}</td><td class="num">${loc}</td>
+        <td class="num">${dist === null ? '—' : dist}</td><td class="num">${etat}</td>
+        <td class="chev">›</td></tr>`;
+  }).join('');
+
+  view.innerHTML = settingsBack('Sauvegarde cloud') + `
+    <div class="card">
+      ${WORKER_URL ? `
+        <div class="sub">Phrase secrète (6 caractères min.). La sauvegarde part automatiquement à chaque modification.</div>
+        <label class="field" style="margin-top:10px"><span>Phrase secrète</span>
+          <input id="cl-pass" type="password" value="${esc(Cloud.pass)}"></label>
+        <div class="row"><div class="grow sub">${Cloud.lastBackup ? 'Dernière sauvegarde : ' + new Date(Cloud.lastBackup).toLocaleString('fr-FR') : 'Jamais sauvegardé'}</div>
+          ${Cloud.pending ? '<span class="badge warn">en attente</span>' : Cloud.lastBackup ? '<span class="badge ok">à jour</span>' : ''}</div>
+        <button class="btn" id="cl-save">Sauvegarder maintenant</button>
+        <button class="btn secondary" id="cl-restore">Restaurer depuis le cloud</button>`
+      : `<div class="sub">Nécessite le Worker Cloudflare (WORKER_URL dans js/config.js).</div>`}
+    </div>
+
+    <h2 class="section">Contenu des données</h2>
+    <div class="card">
+      <table class="dtable">
+        <tr><th>Catégorie</th><th class="num">Appareil</th><th class="num">Cloud</th><th class="num">Écart</th><th></th></tr>
+        ${lignes}
+      </table>
+    </div>
+    <button class="btn secondary" id="cl-check">🔍 Comparer avec le cloud</button>
+    ${cloudSnapshot ? '<div class="sub" style="text-align:center;margin-top:6px">Comparaison faite à l\u2019instant.</div>' : ''}
+
+    <h2 class="section">Fichier de sauvegarde</h2>
+    <div class="card">
+      <button class="btn secondary" id="bk-export">Exporter (JSON)</button>
+      <input type="file" id="bk-file" accept="application/json" hidden>
+      <button class="btn secondary" id="bk-import">Restaurer un fichier</button>
+    </div>`;
+  bindBack();
+
+  view.querySelectorAll('[data-store]').forEach(tr => tr.onclick = () => sheetStoreList(tr.dataset.store));
 
   const clSave = $('#cl-save');
   if (clSave) {
     clSave.onclick = async () => {
       const p = $('#cl-pass').value.trim();
       if (p.length < 6) { toast('6 caractères minimum'); return; }
-      Cloud.pass = p; clSave.textContent = 'Sauvegarde…'; await Cloud.backup(false); renderSettings();
+      Cloud.pass = p; clSave.textContent = 'Sauvegarde…';
+      await Cloud.backup(false); Cloud.pending = false; renderSettings();
     };
     $('#cl-restore').onclick = async () => {
       const p = $('#cl-pass').value.trim();
@@ -1258,17 +1399,18 @@ async function renderSettings() {
       Cloud.pass = p; await Cloud.restore();
     };
   }
-
-  $('#b-save').onclick = async () => {
-    await DB.setSetting('business', {
-      name: $('#b-name').value, address: $('#b-address').value, siret: $('#b-siret').value,
-      phone: $('#b-phone').value, email: $('#b-email').value, iban: $('#b-iban').value, footer: $('#b-footer').value
-    });
-    CURRENCY = $('#b-cur').value; await DB.setSetting('currency', CURRENCY);
-    toast('Enregistré ✓'); renderSettings();
+  const check = $('#cl-check');
+  if (check) check.onclick = async () => {
+    if (!WORKER_URL || !Cloud.pass) { toast('Configure la phrase secrète'); return; }
+    check.textContent = 'Lecture du cloud…';
+    try {
+      const r = await fetch(WORKER_URL + '/backup', { headers: { 'X-Backup-Key': Cloud.pass } });
+      if (r.status === 404) { toast('Aucune sauvegarde dans le cloud'); cloudSnapshot = null; }
+      else if (!r.ok) throw new Error();
+      else { cloudSnapshot = await r.json(); toast('Comparaison effectuée ✓'); }
+    } catch (e) { toast('Lecture impossible'); }
+    renderSettings();
   };
-  await drawTypes(); await drawForfaits(); await drawCollectors();
-
   $('#bk-export').onclick = async () => {
     const blob = new Blob([JSON.stringify(await DB.exportAll())], { type: 'application/json' });
     const a = document.createElement('a');
@@ -1284,8 +1426,58 @@ async function renderSettings() {
   };
 }
 
+// Liste des enregistrements d'une catégorie
+async function sheetStoreList(key) {
+  const st = STORES.find(x => x.key === key);
+  const rows = await DB.all(key);
+  const dist = cloudSnapshot ? (cloudSnapshot[key] || []) : null;
+  const distIds = dist ? new Set(dist.map(r => r.id)) : null;
+  const locIds = new Set(rows.map(r => r.id));
+  const manquants = dist ? dist.filter(r => !locIds.has(r.id)) : [];
 
-// --- Qui encaisse (Loane, l'école…) ---
+  openSheet(`<h3>${st.label} (${rows.length})</h3>
+    ${manquants.length ? `<div class="card accent"><div class="title">${manquants.length} présent(s) dans le cloud seulement</div>
+      <div class="sub">Utilise « Restaurer depuis le cloud » pour les récupérer.</div></div>` : ''}
+    ${rows.length ? rows.map(r => `<div class="card tappable row" data-rec="${r.id}">
+        <div class="grow"><div class="title">${esc(String(st.sum(r) || r.id))}</div>
+        <div class="sub">${esc(r.id)}${distIds && !distIds.has(r.id) ? ' · pas encore dans le cloud' : ''}</div></div>
+        <div class="chev">›</div></div>`).join('')
+      : '<div class="sub">Aucun enregistrement.</div>'}`);
+  $('#sheet').querySelectorAll('[data-rec]').forEach(el => el.onclick = () => sheetRecord(key, el.dataset.rec));
+}
+
+// Fiche technique d'un enregistrement : contrôle et correction
+async function sheetRecord(key, id) {
+  const st = STORES.find(x => x.key === key);
+  const rec = await DB.get(key, id);
+  if (!rec) { toast('Introuvable'); return; }
+  const court = JSON.parse(JSON.stringify(rec));
+  if (court.photo) court.photo = '(photo)';
+  if (court.files) court.files = `(${court.files.length} fichier(s))`;
+
+  openSheet(`<h3>${st.label}</h3>
+    <div class="sub" style="margin-bottom:10px">Modifie les valeurs si tu constates une erreur, puis enregistre. Le format doit rester du JSON valide.</div>
+    <textarea id="rec-json" class="json-edit">${esc(JSON.stringify(court, null, 2))}</textarea>
+    <button class="btn" id="rec-save">Enregistrer</button>
+    <button class="btn danger" id="rec-del">Supprimer cet enregistrement</button>`);
+
+  $('#rec-save').onclick = async () => {
+    let obj;
+    try { obj = JSON.parse($('#rec-json').value); }
+    catch (e) { toast('JSON invalide : vérifie les virgules'); return; }
+    if (obj.photo === '(photo)') obj.photo = rec.photo;                 // on ne perd pas la photo
+    if (typeof obj.files === 'string') obj.files = rec.files;           // ni les partitions
+    obj.id = rec.id;
+    await DB.put(key, obj);
+    closeSheet(); toast('Modifié ✓'); renderSettings();
+  };
+  $('#rec-del').onclick = async () => {
+    if (!confirm('Supprimer définitivement cet enregistrement ?')) return;
+    await DB.del(key, id);
+    closeSheet(); toast('Supprimé'); renderSettings();
+  };
+}
+
 async function drawCollectors() {
   const list = await DB.getSetting('collectors', DEFAULT_COLLECTORS);
   const box = $('#collectors-box'); if (!box) return;
