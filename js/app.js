@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.3.2';
+const APP_VERSION = '2.4.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -984,16 +984,10 @@ async function renderSettings() {
     </div>
 
     <h2 class="section">Types de cours</h2>
-    <div class="card"><label class="field"><span>Un type par ligne</span><textarea id="c-types">${esc(courseTypes.join('\n'))}</textarea></label></div>
+    <div class="card" id="types-box"></div>
 
     <h2 class="section">Forfaits & tarifs</h2>
-    <div class="card">
-      <label class="field"><span>libellé ; nb cours ; prix ; validité(mois) ; départ(cours|achat)</span>
-      <textarea id="c-forfaits" style="min-height:170px">${esc(forfaits.map(f => `${f.label} ; ${f.lessons} ; ${f.price} ; ${f.validity || 2} ; ${f.from === 'purchase' ? 'achat' : 'cours'}`).join('\n'))}</textarea></label>
-      <div class="sub">« cours » = validité qui démarre au 1er cours du forfait · « achat » = à la date d\u2019achat (bons cadeaux).</div>
-      <button class="btn" id="c-save">Enregistrer types & forfaits</button>
-      <button class="btn secondary" id="c-reset">Rétablir les tarifs par défaut</button>
-    </div>
+    <div class="card" id="forfaits-box"></div>
 
     <h2 class="section">Sauvegarde locale</h2>
     <div class="card">
@@ -1035,21 +1029,8 @@ async function renderSettings() {
     CURRENCY = $('#b-cur').value; await DB.setSetting('currency', CURRENCY);
     toast('Enregistré ✓'); renderSettings();
   };
-  $('#c-save').onclick = async () => {
-    await DB.setSetting('courseTypes', $('#c-types').value.split('\n').map(s => s.trim()).filter(Boolean));
-    const forfs = $('#c-forfaits').value.split('\n').map(line => {
-      const p = line.split(';').map(s => s.trim());
-      if (!p[0]) return null;
-      return { label: p[0], lessons: +p[1] || 1, price: +p[2] || 0, validity: p[3] !== undefined ? (+p[3] || 0) : 2, from: (p[4] || '').toLowerCase().startsWith('achat') ? 'purchase' : 'first' };
-    }).filter(Boolean);
-    await DB.setSetting('forfaits', forfs);
-    toast('Enregistré ✓'); renderSettings();
-  };
-  $('#c-reset').onclick = async () => {
-    await DB.setSetting('forfaits', DEFAULT_FORFAITS);
-    await DB.setSetting('courseTypes', DEFAULT_TYPES);
-    toast('Tarifs rétablis ✓'); renderSettings();
-  };
+  await drawTypes(); await drawForfaits();
+
   $('#bk-export').onclick = async () => {
     const blob = new Blob([JSON.stringify(await DB.exportAll())], { type: 'application/json' });
     const a = document.createElement('a');
@@ -1062,6 +1043,89 @@ async function renderSettings() {
     const f = e.target.files[0]; if (!f) return;
     try { await DB.importAll(JSON.parse(await f.text())); toast('Restauré ✓'); renderSettings(); }
     catch (err) { toast('Fichier invalide'); }
+  };
+}
+
+
+// --- Listes éditables : types de cours & forfaits ---
+async function drawTypes() {
+  const types = await DB.getSetting('courseTypes', DEFAULT_TYPES);
+  const box = $('#types-box'); if (!box) return;
+  box.innerHTML = types.map((t, i) => `<div class="editrow">
+      <div class="grow">${esc(t)}</div>
+      <button class="icon-btn" data-del-type="${i}" title="Supprimer">✕</button></div>`).join('')
+    + `<button class="btn secondary" id="add-type">＋ Ajouter un type de cours</button>`;
+  box.querySelectorAll('[data-del-type]').forEach(b => b.onclick = async () => {
+    const list = [...types]; const removed = list.splice(+b.dataset.delType, 1)[0];
+    await DB.setSetting('courseTypes', list); toast('« ' + removed + ' » supprimé'); drawTypes();
+  });
+  $('#add-type').onclick = () => {
+    const name = prompt('Nom du type de cours :');
+    if (!name || !name.trim()) return;
+    DB.setSetting('courseTypes', [...types, name.trim()]).then(() => { toast('Ajouté ✓'); drawTypes(); });
+  };
+}
+
+async function drawForfaits() {
+  const forfaits = await DB.getSetting('forfaits', DEFAULT_FORFAITS);
+  const box = $('#forfaits-box'); if (!box) return;
+  box.innerHTML = forfaits.map((f, i) => `<div class="editrow">
+      <div class="grow"><div class="title">${esc(f.label)}</div>
+        <div class="sub">${f.lessons} cours · ${fmtMoney(f.price)}${f.validity ? ' · valable ' + f.validity + ' mois ' + (f.from === 'purchase' ? 'dès l\u2019achat' : 'dès le 1er cours') : ''}</div></div>
+      <button class="icon-btn edit" data-edit-f="${i}" title="Modifier">✎</button>
+      <button class="icon-btn" data-del-f="${i}" title="Supprimer">✕</button></div>`).join('')
+    + `<button class="btn secondary" id="add-forfait">＋ Ajouter un forfait</button>
+       <button class="btn secondary" id="reset-forfaits">Rétablir les tarifs par défaut</button>`;
+
+  box.querySelectorAll('[data-del-f]').forEach(b => b.onclick = async () => {
+    const f = forfaits[+b.dataset.delF];
+    if (!confirm('Supprimer le forfait « ' + f.label + ' » ?\n\nLes paiements déjà enregistrés avec ce forfait ne sont pas modifiés.')) return;
+    const list = [...forfaits]; list.splice(+b.dataset.delF, 1);
+    await DB.setSetting('forfaits', list); toast('Forfait supprimé'); drawForfaits();
+  });
+  box.querySelectorAll('[data-edit-f]').forEach(b => b.onclick = () => sheetForfait(+b.dataset.editF));
+  $('#add-forfait').onclick = () => sheetForfait(null);
+  $('#reset-forfaits').onclick = async () => {
+    if (!confirm('Rétablir la liste de tarifs par défaut ?')) return;
+    await DB.setSetting('forfaits', DEFAULT_FORFAITS); toast('Tarifs rétablis ✓'); drawForfaits();
+  };
+}
+
+async function sheetForfait(index) {
+  const forfaits = await DB.getSetting('forfaits', DEFAULT_FORFAITS);
+  const f = index === null ? { label: '', lessons: 1, price: 0, validity: 2, from: 'first' } : forfaits[index];
+  openSheet(`
+    <h3>${index === null ? 'Nouveau forfait' : 'Modifier le forfait'}</h3>
+    <label class="field"><span>Libellé</span><input id="ff-label" value="${esc(f.label)}"></label>
+    <div class="field-row">
+      <label class="field"><span>Nombre de cours</span><input type="number" id="ff-lessons" value="${f.lessons}"></label>
+      <label class="field"><span>Prix</span><input type="number" id="ff-price" value="${f.price}"></label>
+    </div>
+    <div class="field-row">
+      <label class="field"><span>Validité (mois)</span><input type="number" id="ff-valid" value="${f.validity || 0}"></label>
+      <label class="field"><span>Départ validité</span>
+        <select id="ff-from">
+          <option value="first" ${f.from !== 'purchase' ? 'selected' : ''}>1er cours</option>
+          <option value="purchase" ${f.from === 'purchase' ? 'selected' : ''}>date d\u2019achat</option>
+        </select></label>
+    </div>
+    <button class="btn" id="ff-save">Enregistrer</button>
+    ${index === null ? '' : '<button class="btn danger" id="ff-del">Supprimer ce forfait</button>'}
+  `);
+  $('#ff-save').onclick = async () => {
+    const label = $('#ff-label').value.trim();
+    if (!label) { toast('Le libellé est obligatoire'); return; }
+    const item = { label, lessons: +$('#ff-lessons').value || 1, price: +$('#ff-price').value || 0,
+                   validity: +$('#ff-valid').value || 0, from: $('#ff-from').value };
+    const list = [...forfaits];
+    if (index === null) list.push(item); else list[index] = item;
+    await DB.setSetting('forfaits', list);
+    closeSheet(); toast('Forfait enregistré ✓'); drawForfaits();
+  };
+  if (index !== null) $('#ff-del').onclick = async () => {
+    const list = [...forfaits]; list.splice(index, 1);
+    await DB.setSetting('forfaits', list);
+    closeSheet(); toast('Forfait supprimé'); drawForfaits();
   };
 }
 

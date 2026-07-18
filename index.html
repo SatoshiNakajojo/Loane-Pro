@@ -7,16 +7,17 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Loane Pro">
-<link rel="apple-touch-icon" href="icons/icon-180-v3.png">
+<link rel="apple-touch-icon" href="icons/icon-180-v4.png">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#0E5A34">
+<link rel="preload" as="image" href="icons/logo-v4.jpg">
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
 
 <!-- Écran de lancement -->
 <div id="splash">
-  <img src="icons/logo-v3.png" alt="Loane Pro" class="splash-logo">
+  <img src="icons/logo-v4.jpg" alt="Loane Pro" class="splash-logo">
   <div class="splash-name">Loane Pro</div>
   <div class="splash-bar"><i></i></div>
   <div class="splash-version" id="splash-version"></div>
@@ -24,7 +25,7 @@
 
 <!-- Écran de verrouillage -->
 <div id="lock" hidden>
-  <img src="icons/logo-v3.png" alt="" class="lock-logo">
+  <img src="icons/logo-v4.jpg" alt="" class="lock-logo">
   <div class="lock-title">Code d'accès</div>
   <div class="lock-dots" id="lock-dots"></div>
   <div class="lock-msg" id="lock-msg"></div>
@@ -44,12 +45,12 @@
 <main id="view"></main>
 
 <nav class="tabbar">
-  <button class="tab active" data-tab="agenda"><span class="tab-ico">📅</span>Agenda</button>
-  <button class="tab" data-tab="students"><span class="tab-ico">🎤</span>Élèves</button>
-  <button class="tab" data-tab="hours"><span class="tab-ico">⏱️</span>Heures</button>
-  <button class="tab" data-tab="billing"><span class="tab-ico">🧾</span>Factures</button>
-  <button class="tab" data-tab="library"><span class="tab-ico">🎼</span>Chants</button>
-  <button class="tab" data-tab="settings"><span class="tab-ico">⚙️</span>Réglages</button>
+  <button class="tab active" data-tab="agenda"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/><circle cx="12" cy="15" r="1.4" fill="currentColor" stroke="none"/></svg><span>Agenda</span></button>
+  <button class="tab" data-tab="students"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14a4.5 4.5 0 0 0 4.5-4.5V7a4.5 4.5 0 1 0-9 0v2.5A4.5 4.5 0 0 0 12 14Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/></svg><span>Élèves</span></button>
+  <button class="tab" data-tab="hours"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12.5" r="8"/><path d="M12 8v4.8l3 1.8M9 2.5h6"/></svg><span>Heures</span></button>
+  <button class="tab" data-tab="billing"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-3-1.8L12 21l-3-1.8L6 21Z"/><path d="M9.5 8h5M9.5 12h5"/></svg><span>Factures</span></button>
+  <button class="tab" data-tab="library"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/></svg><span>Chants</span></button>
+  <button class="tab" data-tab="settings"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-2.87 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.87-1.2l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 11.5 4.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.87 1.2l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 11a2 2 0 1 1 0 4Z"/></svg><span>Réglages</span></button>
 </nav>
 
 <div id="sheet-backdrop" hidden></div>
