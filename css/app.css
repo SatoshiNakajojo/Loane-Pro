@@ -287,3 +287,69 @@ a.filelink{color:var(--green);font-weight:650;text-decoration:none;display:block
   border-radius:9px;font-size:1rem;flex-shrink:0;font-weight:700;
 }
 .icon-btn.edit{background:var(--green-soft);color:var(--green)}
+
+/* ===== Agenda : navigation, vue semaine, vue mois ===== */
+.cal-nav{
+  display:flex;align-items:center;gap:10px;margin-bottom:14px;
+  background:var(--surface);border:1px solid rgba(233,223,209,.9);
+  border-radius:13px;padding:8px 10px;box-shadow:var(--shadow);
+}
+.cal-label{
+  flex:1;text-align:center;font-family:var(--serif);font-size:1rem;
+  font-weight:600;color:var(--green);text-transform:capitalize;
+}
+.nav-btn{
+  width:36px;height:36px;border-radius:10px;border:none;flex-shrink:0;
+  background:var(--green-soft);color:var(--green);font-size:1.3rem;font-weight:700;
+}
+.nav-btn:active{background:var(--orange-soft);color:var(--orange)}
+
+/* --- vue semaine --- */
+.week-list{margin-top:4px}
+.week-day{margin-bottom:16px}
+.week-head{
+  display:flex;align-items:baseline;justify-content:space-between;
+  padding:0 4px 6px;border-bottom:1px solid var(--line);margin-bottom:8px;
+}
+.week-dow{
+  font-family:var(--serif);font-size:1rem;font-weight:600;color:var(--green);
+  text-transform:capitalize;
+}
+.week-num{font-size:.8rem;color:var(--ink-soft);font-weight:700;font-variant-numeric:tabular-nums}
+.week-day.now .week-head{border-bottom-color:var(--orange)}
+.week-day.now .week-dow{color:var(--orange)}
+.week-empty{color:var(--silver);padding:2px 6px 8px;font-size:.9rem}
+
+/* --- vue mois --- */
+.cal-grid{
+  display:grid;grid-template-columns:26px repeat(7,1fr);gap:3px;
+  background:var(--surface);border:1px solid rgba(233,223,209,.9);
+  border-radius:14px;padding:10px 8px;box-shadow:var(--shadow);margin-bottom:6px;
+}
+.cal-corner,.cal-dow{
+  text-align:center;font-size:.68rem;font-weight:800;color:var(--ink-soft);
+  text-transform:uppercase;letter-spacing:.04em;padding-bottom:4px;
+}
+.cal-corner{color:var(--orange)}
+.cal-week{
+  display:flex;align-items:center;justify-content:center;
+  font-size:.66rem;font-weight:800;color:var(--orange);
+  font-variant-numeric:tabular-nums;
+}
+.cal-cell{
+  aspect-ratio:1;display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:3px;border-radius:9px;font-size:.86rem;font-weight:600;
+  font-variant-numeric:tabular-nums;color:var(--ink);
+}
+.cal-cell.out{color:var(--silver);opacity:.55}
+.cal-cell.now{background:var(--orange-soft);color:#9E4C0C;font-weight:800}
+.cal-cell.sel{background:var(--grad);color:#FFF6E9}
+.cal-cell.sel .dots i{background:#FFF6E9 !important}
+.cal-cell:active{background:var(--green-soft)}
+.dots{display:flex;gap:2px;height:5px}
+.dots i{width:5px;height:5px;border-radius:50%;background:var(--green)}
+.dots i.k-cours{background:var(--green)}
+.dots i.k-repetition{background:var(--gold)}
+.dots i.k-concert{background:var(--orange)}
+.dots i.k-autre{background:var(--silver)}
+.dots i.k-gcal{background:var(--orange-bright)}

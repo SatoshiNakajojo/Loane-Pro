@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.4.0';
+const APP_VERSION = '2.5.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -285,58 +285,105 @@ function switchTab(tab) {
 
 // ====== AGENDA ======
 let gcalCache = [];
-async function renderAgenda() {
-  const lessons = (await DB.all('lessons')).sort((a, b) => new Date(a.date) - new Date(b.date));
-  const students = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const upcoming = lessons.filter(l => new Date(l.date) >= today);
+let agendaView = 'list';          // list | week | month
+let agendaAnchor = new Date();    // date de référence pour les vues semaine/mois
+let selectedDay = null;
+
+// Numéro de semaine ISO 8601
+function isoWeek(d) {
+  const t = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  t.setUTCDate(t.getUTCDate() + 4 - (t.getUTCDay() || 7));
+  const y0 = new Date(Date.UTC(t.getUTCFullYear(), 0, 1));
+  return Math.ceil(((t - y0) / 864e5 + 1) / 7);
+}
+function mondayOf(d) {
+  const x = new Date(d); x.setHours(0, 0, 0, 0);
+  x.setDate(x.getDate() - ((x.getDay() + 6) % 7));
+  return x;
+}
+const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateString();
+
+// Toutes les entrées (séances + événements Google non rattachés)
+async function agendaItems() {
+  const lessons = await DB.all('lessons');
   const linked = new Set(lessons.map(l => l.gcalEventId).filter(Boolean));
-  const gUp = gcalCache.filter(e => !linked.has(e.id) && new Date(e.start.dateTime) >= today);
-  const gPast = gcalCache.filter(e => !linked.has(e.id) && new Date(e.start.dateTime) < today);
+  const students = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
+  const items = lessons.map(l => ({
+    date: l.date, lesson: l, kind: l.kind || 'cours',
+    label: (students[l.studentId] ? students[l.studentId].name : (l.title || KINDS[l.kind || 'cours'].label))
+  }));
+  for (const e of gcalCache) {
+    if (!linked.has(e.id)) items.push({ date: e.start.dateTime, gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
+  }
+  return items.sort((a, b) => new Date(a.date) - new Date(b.date));
+}
 
-  const items = [
-    ...upcoming.map(l => ({ date: l.date, lesson: l })),
-    ...gUp.map(e => ({ date: e.start.dateTime, gcal: e }))
-  ].sort((a, b) => new Date(a.date) - new Date(b.date));
+function itemCard(it) {
+  if (it.gcal) return `<div class="card tappable row" data-gcal="${it.gcal.id}">
+      <div class="lesson-time">${fmtTime(it.date)}</div>
+      <div class="grow"><div class="title">${esc(it.label)}</div>
+      <div class="sub"><span class="gcal-dot">●</span> Google · toucher pour rattacher</div></div>
+      <div class="chev">›</div></div>`;
+  const l = it.lesson, k = KINDS[it.kind];
+  return `<div class="card tappable row" data-lesson="${l.id}">
+      <div class="lesson-time">${fmtTime(it.date)}</div>
+      <div class="grow"><div class="title">${k.icon} ${esc(it.label)}</div>
+      <div class="sub">${esc(l.type || k.label)} · ${l.duration || 60} min ${l.gcalEventId ? '<span class="gcal-dot">● Google</span>' : ''}</div></div>
+      <div class="chev">›</div></div>`;
+}
 
-  let html = '';
+async function renderAgenda() {
+  const items = await agendaItems();
+  const isToday = agendaView === 'list' ||
+    (agendaView === 'week' && mondayOf(agendaAnchor).getTime() === mondayOf(new Date()).getTime()) ||
+    (agendaView === 'month' && agendaAnchor.getMonth() === new Date().getMonth() && agendaAnchor.getFullYear() === new Date().getFullYear());
+
+  let html = `<div class="seg">
+      <button data-view="list" class="${agendaView === 'list' ? 'on' : ''}">Liste</button>
+      <button data-view="week" class="${agendaView === 'week' ? 'on' : ''}">Semaine</button>
+      <button data-view="month" class="${agendaView === 'month' ? 'on' : ''}">Mois</button>
+    </div>`;
+
+  if (agendaView !== 'list') {
+    const lab = agendaView === 'week'
+      ? `Semaine ${isoWeek(mondayOf(agendaAnchor))} · ${mondayOf(agendaAnchor).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })} — ${new Date(mondayOf(agendaAnchor).getTime() + 6 * 864e5).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}`
+      : agendaAnchor.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' });
+    html += `<div class="cal-nav">
+        <button class="nav-btn" data-nav="-1">‹</button>
+        <div class="cal-label">${esc(lab)}</div>
+        <button class="nav-btn" data-nav="1">›</button>
+      </div>`;
+  }
+  if (!isToday) html += `<button class="btn gold" id="btn-today" style="margin-top:0">📍 Aujourd\u2019hui</button>`;
+
   if (GC.connected) {
-    html += `<button class="btn secondary" id="btn-sync" style="margin-top:0">🔄 Synchroniser Google Agenda</button>`;
-    if (gPast.length) html += `<div class="card accent tappable" id="past-import" style="margin-top:12px">
-      <div class="title">📥 ${gPast.length} événement${gPast.length > 1 ? 's' : ''} passé${gPast.length > 1 ? 's' : ''} à rattacher</div>
-      <div class="sub">Toucher pour les affecter à un élève ou les compter en heures.</div></div>`;
+    html += `<button class="btn secondary" id="btn-sync">🔄 Synchroniser Google Agenda</button>`;
+    const past = gcalCache.filter(e => new Date(e.start.dateTime) < new Date(new Date().toDateString()))
+      .filter(e => !items.some(i => i.lesson && i.lesson.gcalEventId === e.id));
+    if (past.length) html += `<div class="card accent tappable" id="past-import" style="margin-top:12px">
+        <div class="title">📥 ${past.length} événement${past.length > 1 ? 's' : ''} passé${past.length > 1 ? 's' : ''} à rattacher</div>
+        <div class="sub">Toucher pour les affecter à un élève ou les compter en heures.</div></div>`;
   } else if (WORKER_URL) {
     html += `<div class="card"><div class="sub">Google Agenda non connecté.</div><button class="btn secondary" id="btn-gc-connect">Connecter Google Agenda</button></div>`;
   }
 
-  if (!items.length) {
-    html += `<div class="empty"><div class="big">🎶</div>Aucun cours à venir.<br>Touche ＋ pour en ajouter.</div>`;
-  } else {
-    let curDay = '';
-    for (const it of items) {
-      const d = new Date(it.date), key = d.toDateString();
-      if (key !== curDay) {
-        curDay = key;
-        html += `<div class="day-head">${fmtDate(d)} ${key === new Date().toDateString() ? '<span class="today">· aujourd\u2019hui</span>' : ''}</div>`;
-      }
-      if (it.lesson) {
-        const l = it.lesson, k = KINDS[l.kind || 'cours'];
-        const s = students[l.studentId];
-        html += `<div class="card tappable row" data-lesson="${l.id}">
-          <div class="lesson-time">${fmtTime(it.date)}</div>
-          <div class="grow"><div class="title">${k.icon} ${esc(s ? s.name : (l.title || k.label))}</div>
-          <div class="sub">${esc(l.type || k.label)} · ${l.duration || 60} min ${l.gcalEventId ? '<span class="gcal-dot">● Google</span>' : ''}</div></div>
-          <div class="chev">›</div></div>`;
-      } else {
-        html += `<div class="card tappable row" data-gcal="${it.gcal.id}">
-          <div class="lesson-time">${fmtTime(it.date)}</div>
-          <div class="grow"><div class="title">${esc(it.gcal.summary || '(sans titre)')}</div>
-          <div class="sub"><span class="gcal-dot">●</span> Google · toucher pour rattacher</div></div>
-          <div class="chev">›</div></div>`;
-      }
-    }
-  }
+  html += agendaView === 'list' ? viewList(items) : agendaView === 'week' ? viewWeek(items) : viewMonth(items);
   view.innerHTML = html;
+
+  view.querySelectorAll('[data-view]').forEach(b => b.onclick = () => {
+    agendaView = b.dataset.view; selectedDay = null; renderAgenda();
+  });
+  view.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => {
+    const step = +b.dataset.nav;
+    if (agendaView === 'week') agendaAnchor = new Date(agendaAnchor.getTime() + step * 7 * 864e5);
+    else agendaAnchor = new Date(agendaAnchor.getFullYear(), agendaAnchor.getMonth() + step, 1);
+    selectedDay = null; renderAgenda();
+  });
+  const today = $('#btn-today');
+  if (today) today.onclick = () => { agendaAnchor = new Date(); selectedDay = new Date(); renderAgenda(); };
+  view.querySelectorAll('[data-day]').forEach(el => el.onclick = () => {
+    selectedDay = new Date(el.dataset.day); renderAgenda();
+  });
 
   const sync = $('#btn-sync');
   if (sync) sync.onclick = async () => {
@@ -345,7 +392,83 @@ async function renderAgenda() {
     renderAgenda();
   };
   const conn = $('#btn-gc-connect'); if (conn) conn.onclick = () => GC.connect();
-  const pastBtn = $('#past-import'); if (pastBtn) pastBtn.onclick = () => sheetPastList(gPast);
+  const pastBtn = $('#past-import');
+  if (pastBtn) pastBtn.onclick = () => sheetPastList(gcalCache.filter(e => new Date(e.start.dateTime) < new Date(new Date().toDateString())));
+}
+
+// --- Vue liste (à venir) ---
+function viewList(items) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const up = items.filter(i => new Date(i.date) >= today);
+  if (!up.length) return `<div class="empty"><div class="big">🎶</div>Aucun cours à venir.<br>Touche ＋ pour en ajouter.</div>`;
+  let html = '', cur = '';
+  for (const it of up) {
+    const key = new Date(it.date).toDateString();
+    if (key !== cur) {
+      cur = key;
+      html += `<div class="day-head">${fmtDate(it.date)} ${sameDay(it.date, new Date()) ? '<span class="today">· aujourd\u2019hui</span>' : ''}</div>`;
+    }
+    html += itemCard(it);
+  }
+  return html;
+}
+
+// --- Vue semaine ---
+function viewWeek(items) {
+  const mon = mondayOf(agendaAnchor);
+  let html = '<div class="week-list">';
+  for (let i = 0; i < 7; i++) {
+    const day = new Date(mon.getTime() + i * 864e5);
+    const dayItems = items.filter(x => sameDay(x.date, day));
+    const isNow = sameDay(day, new Date());
+    html += `<div class="week-day ${isNow ? 'now' : ''}">
+        <div class="week-head">
+          <span class="week-dow">${day.toLocaleDateString('fr-FR', { weekday: 'long' })}</span>
+          <span class="week-num">${day.getDate()}/${day.getMonth() + 1}</span>
+        </div>
+        ${dayItems.length ? dayItems.map(itemCard).join('') : '<div class="week-empty">—</div>'}
+      </div>`;
+  }
+  return html + '</div>';
+}
+
+// --- Vue mois ---
+function viewMonth(items) {
+  const y = agendaAnchor.getFullYear(), m = agendaAnchor.getMonth();
+  const first = new Date(y, m, 1);
+  const startGrid = mondayOf(first);
+  const weeks = [];
+  for (let w = 0; w < 6; w++) {
+    const days = [];
+    for (let d = 0; d < 7; d++) days.push(new Date(startGrid.getTime() + (w * 7 + d) * 864e5));
+    weeks.push(days);
+    if (days[6].getMonth() !== m && days[6] > first) break;
+  }
+
+  let html = `<div class="cal-grid">
+    <div class="cal-corner">S</div>
+    ${['L', 'M', 'M', 'J', 'V', 'S', 'D'].map(d => `<div class="cal-dow">${d}</div>`).join('')}`;
+  for (const days of weeks) {
+    html += `<div class="cal-week">${isoWeek(days[0])}</div>`;
+    for (const day of days) {
+      const dayItems = items.filter(x => sameDay(x.date, day));
+      const out = day.getMonth() !== m;
+      const isNow = sameDay(day, new Date());
+      const sel = selectedDay && sameDay(day, selectedDay);
+      html += `<div class="cal-cell ${out ? 'out' : ''} ${isNow ? 'now' : ''} ${sel ? 'sel' : ''}" data-day="${day.toISOString()}">
+          <span>${day.getDate()}</span>
+          <div class="dots">${dayItems.slice(0, 3).map(i => `<i class="k-${i.kind}"></i>`).join('')}</div>
+        </div>`;
+    }
+  }
+  html += '</div>';
+
+  const day = selectedDay || new Date();
+  const dayItems = items.filter(x => sameDay(x.date, day));
+  html += `<div class="day-head">${fmtDate(day)} ${sameDay(day, new Date()) ? '<span class="today">· aujourd\u2019hui</span>' : ''}</div>`;
+  html += dayItems.length ? dayItems.map(itemCard).join('')
+    : `<div class="sub" style="padding:8px 4px">Aucune séance ce jour-là.</div>`;
+  return html;
 }
 
 // Délégation : fiable même après re-rendu
