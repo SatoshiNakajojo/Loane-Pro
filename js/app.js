@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.9.0';
+const APP_VERSION = '3.0.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -305,6 +305,7 @@ async function paymentStatus(student) {
 // ====== Navigation ======
 let currentTab = 'agenda';
 let currentStudent = null;   // fiche élève affichée, pour y revenir après modification
+let studentQuery = '';       // texte saisi dans la recherche d'élèves
 
 // Rafraîchit l'écran réellement affiché (et non l'onglet en général)
 function refreshView() {
@@ -322,7 +323,7 @@ const TABS = {
 document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 function switchTab(tab) {
   if (tab !== 'settings') settingsPage = null;
-  if (tab !== 'students') currentStudent = null;
+  if (tab !== 'students') { currentStudent = null; studentQuery = ''; }
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   const t = TABS[tab];
@@ -741,7 +742,9 @@ async function renderStudents() {
     view.innerHTML = `<div class="empty"><div class="big">🎤</div><div class="empty-title">Aucun élève</div>Touche ＋ pour créer un profil.</div>`;
     return;
   }
-  let html = '';
+
+  // on prépare une fois les cartes (avec l'état des paiements), puis on filtre à la volée
+  const cartes = [];
   for (const s of students) {
     const st = await paymentStatus(s);
     let badge;
@@ -749,14 +752,34 @@ async function renderStudents() {
     else if (st.expired) badge = '<span class="badge due">Forfait expiré</span>';
     else if (st.remaining <= 0) badge = '<span class="badge due">À encaisser</span>';
     else badge = `<span class="badge ok">${st.remaining} cours</span>`;
-    html += `<div class="card tappable row" data-student="${s.id}">
-      ${s.photo ? `<img class="avatar" src="${s.photo}">` : `<div class="avatar">${initials(s.name)}</div>`}
-      <div class="grow"><div class="title">${esc(s.name)}</div>
-      <div class="sub">${st.last ? (st.expiry ? 'Valable jusqu\u2019au ' + fmtDateFull(st.expiry) : 'Forfait non démarré') : 'Aucun paiement'}</div></div>
-      <div class="right">${badge}</div><div class="chev">›</div></div>`;
+    cartes.push({
+      cle: [s.name, s.phone, s.email, s.level, descriptionOf(s)].filter(Boolean).join(' ').toLowerCase(),
+      html: `<div class="card tappable row" data-student="${s.id}">
+        ${s.photo ? `<img class="avatar" src="${s.photo}">` : `<div class="avatar">${initials(s.name)}</div>`}
+        <div class="grow"><div class="title">${esc(s.name)}</div>
+        <div class="sub">${st.last ? (st.expiry ? 'Valable jusqu\u2019au ' + fmtDateFull(st.expiry) : 'Forfait non démarré') : 'Aucun paiement'}</div></div>
+        <div class="right">${badge}</div><div class="chev">›</div></div>`
+    });
   }
-  view.innerHTML = html;
-  view.querySelectorAll('[data-student]').forEach(el => el.onclick = () => renderStudentDetail(el.dataset.student));
+
+  view.innerHTML = `<div class="search">
+      <input id="stu-search" type="search" placeholder="Rechercher un élève…" value="${esc(studentQuery)}" autocomplete="off">
+    </div>
+    <div id="stu-count" class="search-count" hidden></div>
+    <div id="stu-list"></div>`;
+
+  const dessine = q => {
+    const mots = q.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const vus = mots.length ? cartes.filter(c => mots.every(m => c.cle.includes(m))) : cartes;
+    $('#stu-list').innerHTML = vus.length ? vus.map(c => c.html).join('')
+      : `<div class="empty"><div class="big">🔎</div><div class="empty-title">Aucun résultat</div>Essaie un autre nom.</div>`;
+    const cpt = $('#stu-count');
+    cpt.hidden = !mots.length;
+    cpt.textContent = `${vus.length} élève${vus.length > 1 ? 's' : ''} sur ${cartes.length}`;
+    $('#stu-list').querySelectorAll('[data-student]').forEach(el => el.onclick = () => renderStudentDetail(el.dataset.student));
+  };
+  dessine(studentQuery);
+  $('#stu-search').oninput = e => { studentQuery = e.target.value; dessine(studentQuery); };
 }
 
 async function renderStudentDetail(id) {
