@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.8.0';
+const APP_VERSION = '2.9.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -223,7 +223,7 @@ const Cloud = {
       if (r.status === 404) { toast('Aucune sauvegarde trouvée'); return; }
       if (!r.ok) throw new Error();
       await DB.importAll(await r.json());
-      toast('Sauvegarde restaurée ✓'); TABS[currentTab].render();
+      toast('Sauvegarde restaurée ✓'); refreshView();
     } catch (e) { toast('Échec de la restauration'); }
   },
   auto() {
@@ -304,6 +304,13 @@ async function paymentStatus(student) {
 
 // ====== Navigation ======
 let currentTab = 'agenda';
+let currentStudent = null;   // fiche élève affichée, pour y revenir après modification
+
+// Rafraîchit l'écran réellement affiché (et non l'onglet en général)
+function refreshView() {
+  if (currentTab === 'students' && currentStudent) return renderStudentDetail(currentStudent);
+  return TABS[currentTab].render();
+}
 const TABS = {
   agenda: { title: 'Agenda', render: renderAgenda, action: () => sheetLesson() },
   students: { title: 'Élèves', render: renderStudents, action: () => sheetStudent() },
@@ -315,6 +322,7 @@ const TABS = {
 document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 function switchTab(tab) {
   if (tab !== 'settings') settingsPage = null;
+  if (tab !== 'students') currentStudent = null;
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   const t = TABS[tab];
@@ -585,7 +593,7 @@ async function sheetImportGcal(ev) {
       note: ev.description || '', gcalEventId: ev.id
     });
     gcalCache = gcalCache.filter(x => x.id !== ev.id);
-    closeSheet(); toast('Rattaché ✓'); TABS[currentTab].render();
+    closeSheet(); toast('Rattaché ✓'); refreshView();
   };
 }
 
@@ -642,11 +650,11 @@ async function sheetLesson(id, presetStudent, presetKind) {
     item.note = $('#f-note').value;
     await GC.pushLesson(item, k === 'cours' ? await DB.get('students', item.studentId) : null);
     await DB.put('lessons', item);
-    closeSheet(); toast('Enregistré ✓'); TABS[currentTab].render();
+    closeSheet(); toast('Enregistré ✓'); refreshView();
   };
   if (l) $('#f-del').onclick = async () => {
     await GC.deleteLesson(l); await DB.del('lessons', l.id);
-    closeSheet(); toast('Supprimé'); TABS[currentTab].render();
+    closeSheet(); toast('Supprimé'); refreshView();
   };
 }
 
@@ -727,6 +735,7 @@ async function renderHours() {
 
 // ====== ÉLÈVES ======
 async function renderStudents() {
+  currentStudent = null;
   const students = (await DB.all('students')).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
   if (!students.length) {
     view.innerHTML = `<div class="empty"><div class="big">🎤</div><div class="empty-title">Aucun élève</div>Touche ＋ pour créer un profil.</div>`;
@@ -753,6 +762,7 @@ async function renderStudents() {
 async function renderStudentDetail(id) {
   const s = await DB.get('students', id);
   if (!s) return renderStudents();
+  currentStudent = id;
   const allItems = await lessonsOf(id);
   const lessons = allItems.filter(l => (l.kind || 'cours') === 'cours');
   const now = Date.now();
