@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.6.0';
+const APP_VERSION = '2.7.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -747,10 +747,9 @@ async function renderStudentDetail(id) {
 
     <h2 class="section">Suivi pédagogique</h2>
     <div class="card">
-      ${s.level ? `<div><span class="tag g">Niveau</span> ${esc(s.level)}</div>` : ''}
-      ${s.strengths ? `<div style="margin-top:6px"><span class="tag">Points forts</span> ${esc(s.strengths)}</div>` : ''}
-      ${s.difficulties ? `<div style="margin-top:6px"><span class="tag">Difficultés</span> ${esc(s.difficulties)}</div>` : ''}
-      ${!s.level && !s.strengths && !s.difficulties ? '<div class="sub">À renseigner via « Modifier le profil ».</div>' : ''}
+      ${s.level ? `<div style="margin-bottom:8px"><span class="tag g">Niveau</span> ${esc(s.level)}</div>` : ''}
+      ${descriptionOf(s) ? `<p style="white-space:pre-wrap">${esc(descriptionOf(s))}</p>` : ''}
+      ${!s.level && !descriptionOf(s) ? '<div class="sub">À renseigner via « Modifier le profil ».</div>' : ''}
     </div>
 
     <h2 class="section">Notes de cours</h2>
@@ -759,9 +758,9 @@ async function renderStudentDetail(id) {
 
     <h2 class="section">Paiements</h2>
     <button class="btn secondary" id="add-pay" style="margin-top:0">＋ Enregistrer un paiement</button>
-    ${payments.map(p => `<div class="card row"><div class="grow"><div class="title">${fmtMoney(p.amount)} — ${p.lessonsCovered} cours</div>
+    ${payments.map(p => `<div class="card tappable row" data-pay="${p.id}"><div class="grow"><div class="title">${fmtMoney(p.amount)} — ${p.lessonsCovered} cours</div>
       <div class="sub">${esc(p.label || '')} · ${fmtDateFull(p.date)}${p.method ? ' · ' + esc(p.method) : ''}</div></div>
-      ${p.collectedBy ? `<span class="badge ghost">${esc(p.collectedBy)}</span>` : ''}</div>`).join('')}
+      ${p.collectedBy ? `<span class="badge ghost">${esc(p.collectedBy)}</span>` : ''}<div class="chev">›</div></div>`).join('')}
 
     <h2 class="section">Prochains cours</h2>
     <button class="btn secondary" id="add-lesson" style="margin-top:0">＋ Planifier un cours</button>
@@ -776,6 +775,17 @@ async function renderStudentDetail(id) {
   $('#add-pay').onclick = () => sheetPayment(id);
   $('#add-note').onclick = () => sheetNote(id);
   view.querySelectorAll('[data-note]').forEach(el => el.onclick = () => sheetNote(id, el.dataset.note));
+  view.querySelectorAll('[data-pay]').forEach(el => el.onclick = () => sheetPayment(id, el.dataset.pay));
+}
+
+// Récupère la description, en reprenant les anciens champs s'ils existent
+function descriptionOf(s) {
+  if (s.description !== undefined && s.description !== null) return s.description;
+  const vieux = [
+    s.strengths ? 'Points forts : ' + s.strengths : '',
+    s.difficulties ? 'Difficultés : ' + s.difficulties : ''
+  ].filter(Boolean).join('\n');
+  return vieux;
 }
 
 function fileToDataURL(file, maxSize = 800) {
@@ -807,8 +817,7 @@ async function sheetStudent(id) {
       <label class="field"><span>E-mail</span><input id="f-email" type="email" value="${esc(s.email || '')}"></label>
     </div>
     <label class="field"><span>Niveau</span><input id="f-level" value="${esc(s.level || '')}"></label>
-    <label class="field"><span>Points forts</span><textarea id="f-strong">${esc(s.strengths || '')}</textarea></label>
-    <label class="field"><span>Difficultés</span><textarea id="f-diff">${esc(s.difficulties || '')}</textarea></label>
+    <label class="field"><span>Description</span><textarea id="f-desc" style="min-height:130px" placeholder="Parcours, objectifs, remarques…">${esc(descriptionOf(s))}</textarea></label>
     <button class="btn" id="f-save">${id ? 'Enregistrer' : 'Créer le profil'}</button>
     ${id ? '<button class="btn danger" id="f-del">Supprimer cet élève</button>' : ''}
   `);
@@ -822,7 +831,10 @@ async function sheetStudent(id) {
   $('#f-save').onclick = async () => {
     const name = $('#f-name').value.trim();
     if (!name) { toast('Le nom est obligatoire'); return; }
-    const saved = await DB.put('students', { ...(s.id ? s : {}), name, photo, phone: $('#f-phone').value, email: $('#f-email').value, level: $('#f-level').value, strengths: $('#f-strong').value, difficulties: $('#f-diff').value });
+    const obj = { ...(s.id ? s : {}), name, photo, phone: $('#f-phone').value, email: $('#f-email').value,
+                  level: $('#f-level').value, description: $('#f-desc').value };
+    delete obj.strengths; delete obj.difficulties;      // anciens champs, désormais fusionnés
+    const saved = await DB.put('students', obj);
     closeSheet(); toast('Profil enregistré ✓'); renderStudentDetail(saved.id);
   };
   if (id) $('#f-del').onclick = async () => {
@@ -832,48 +844,70 @@ async function sheetStudent(id) {
   };
 }
 
-async function sheetPayment(studentId) {
+async function sheetPayment(studentId, payId) {
   const { forfaits, collectors } = await getConfig();
+  const p = payId ? await DB.get('payments', payId) : null;
+  const f0 = forfaits[0] || { price: 0, lessons: 1, validity: 2, from: 'first' };
+  const d = p ? new Date(p.date) : new Date();
+
   openSheet(`
-    <h3>Enregistrer un paiement</h3>
+    <h3>${p ? 'Modifier le paiement' : 'Enregistrer un paiement'}</h3>
     <label class="field"><span>Forfait</span>
-      <select id="f-forfait">${forfaits.map((f, i) => `<option value="${i}">${esc(f.label)} — ${fmtMoney(f.price)}</option>`).join('')}</select></label>
+      <select id="f-forfait">
+        <option value="">${p ? esc(p.label || 'Montant libre') : '— choisir —'}</option>
+        ${forfaits.map((f, i) => `<option value="${i}">${esc(f.label)} — ${fmtMoney(f.price)}</option>`).join('')}
+      </select></label>
     <div class="field-row">
-      <label class="field"><span>Montant</span><input type="number" id="f-amount" value="${forfaits[0].price}"></label>
-      <label class="field"><span>Nb de cours</span><input type="number" id="f-count" value="${forfaits[0].lessons}"></label>
+      <label class="field"><span>Montant</span><input type="number" id="f-amount" value="${p ? p.amount : f0.price}"></label>
+      <label class="field"><span>Nb de cours</span><input type="number" id="f-count" value="${p ? p.lessonsCovered : f0.lessons}"></label>
     </div>
     <div class="field-row">
-      <label class="field"><span>Validité (mois)</span><input type="number" id="f-valid" value="${forfaits[0].validity || 2}"></label>
+      <label class="field"><span>Validité (mois)</span><input type="number" id="f-valid" value="${p ? (p.validityMonths || 0) : (f0.validity || 2)}"></label>
       <label class="field"><span>Départ validité</span>
-        <select id="f-from"><option value="first">1er cours</option><option value="purchase">date d\u2019achat</option></select></label>
+        <select id="f-from">
+          <option value="first" ${!p || p.validityFrom !== 'purchase' ? 'selected' : ''}>1er cours</option>
+          <option value="purchase" ${p && p.validityFrom === 'purchase' ? 'selected' : ''}>date d\u2019achat</option>
+        </select></label>
     </div>
     <div class="field-row">
-      <label class="field"><span>Date</span><input type="date" id="f-date" value="${new Date().toISOString().slice(0, 10)}"></label>
-      <label class="field"><span>Moyen</span><select id="f-method"><option>Chèque</option><option>Espèces</option><option>Virement</option><option>Bon cadeau</option></select></label>
+      <label class="field"><span>Date</span><input type="date" id="f-date" value="${d.toISOString().slice(0, 10)}"></label>
+      <label class="field"><span>Moyen</span>
+        <select id="f-method">${['Chèque', 'Espèces', 'Virement', 'Bon cadeau'].map(m => `<option ${p && p.method === m ? 'selected' : ''}>${m}</option>`).join('')}</select></label>
     </div>
     <label class="field"><span>Encaissé par</span>
-      <select id="f-by">${collectors.map(c => `<option>${esc(c)}</option>`).join('')}</select></label>
-    <button class="btn" id="f-save">Enregistrer</button>
+      <select id="f-by">${collectors.map(c => `<option ${p && p.collectedBy === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
+    <button class="btn" id="f-save">${p ? 'Enregistrer les modifications' : 'Enregistrer'}</button>
+    ${p ? '<button class="btn danger" id="f-del">Supprimer ce paiement</button>' : ''}
   `);
-  const apply = () => {
-    const f = forfaits[+$('#f-forfait').value];
+
+  $('#f-forfait').onchange = e => {
+    const f = forfaits[+e.target.value];
     if (!f) return;
     $('#f-amount').value = f.price; $('#f-count').value = f.lessons;
-    $('#f-valid').value = f.validity || 2; $('#f-from').value = f.from || 'first';
+    $('#f-valid').value = f.validity || 0; $('#f-from').value = f.from || 'first';
   };
-  $('#f-forfait').onchange = apply;
+
   $('#f-save').onclick = async () => {
-    const f = forfaits[+$('#f-forfait').value];
+    const idx = $('#f-forfait').value;
+    const f = idx === '' ? null : forfaits[+idx];
     await DB.put('payments', {
-      id: DB.uid(), studentId, amount: +$('#f-amount').value,
+      id: p ? p.id : DB.uid(), studentId,
+      amount: +$('#f-amount').value,
       lessonsCovered: +$('#f-count').value || 1,
       validityMonths: +$('#f-valid').value || 0,
       validityFrom: $('#f-from').value,
-      label: f ? f.label : '',
-      date: new Date($('#f-date').value).toISOString(), method: $('#f-method').value,
+      label: f ? f.label : (p ? p.label : ''),
+      date: new Date($('#f-date').value).toISOString(),
+      method: $('#f-method').value,
       collectedBy: $('#f-by').value
     });
-    closeSheet(); toast('Paiement enregistré ✓'); renderStudentDetail(studentId);
+    closeSheet(); toast(p ? 'Paiement modifié ✓' : 'Paiement enregistré ✓'); renderStudentDetail(studentId);
+  };
+
+  if (p) $('#f-del').onclick = async () => {
+    if (!confirm('Supprimer ce paiement ?')) return;
+    await DB.del('payments', p.id);
+    closeSheet(); toast('Paiement supprimé'); renderStudentDetail(studentId);
   };
 }
 
