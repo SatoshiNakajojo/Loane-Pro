@@ -94,24 +94,70 @@ export default {
       });
     }
 
-    // 4) Sauvegarde cloud (nécessite le stockage KV "BACKUPS", voir README)
+    // 4) Sauvegarde cloud — avec historique et protection contre l'écrasement
     if (url.pathname === '/backup') {
       if (!env.BACKUPS) return new Response('Stockage KV non configuré (binding BACKUPS)', { status: 501, headers: cors(env) });
       const pass = request.headers.get('X-Backup-Key');
       if (!pass || pass.length < 6) return new Response('Phrase secrète manquante (6 caractères min.)', { status: 401, headers: cors(env) });
       const key = await backupKey(pass);
 
+      const compter = (txt) => {
+        try {
+          const o = JSON.parse(txt); let n = 0;
+          for (const k of Object.keys(o)) if (Array.isArray(o[k]) && k !== 'settings') n += o[k].length;
+          return n;
+        } catch (e) { return -1; }
+      };
+
+      // --- lecture ---
+      if (request.method === 'GET') {
+        // liste de l'historique
+        if (url.searchParams.get('list')) {
+          const idx = await env.BACKUPS.get(key + ':index');
+          return new Response(idx || '[]', { headers: cors(env, { 'Content-Type': 'application/json' }) });
+        }
+        // une sauvegarde précise de l'historique
+        const ts = url.searchParams.get('ts');
+        const data = ts ? await env.BACKUPS.get(key + ':hist:' + ts) : await env.BACKUPS.get(key);
+        if (!data) return new Response('Aucune sauvegarde trouvée', { status: 404, headers: cors(env) });
+        return new Response(data, { headers: cors(env, { 'Content-Type': 'application/json' }) });
+      }
+
+      // --- écriture ---
       if (request.method === 'PUT' || request.method === 'POST') {
         const body = await request.text();
         if (body.length > 20 * 1024 * 1024) return new Response('Sauvegarde trop volumineuse (max 20 Mo)', { status: 413, headers: cors(env) });
+
+        const nouveauNb = compter(body);
+        if (nouveauNb < 0) return new Response('Contenu illisible', { status: 400, headers: cors(env) });
+
+        const actuel = await env.BACKUPS.get(key);
+        const actuelNb = actuel ? compter(actuel) : 0;
+        const force = request.headers.get('X-Force') === '1';
+
+        // garde-fou : on refuse d'écraser une sauvegarde pleine par une base vide ou très amputée
+        if (!force && actuel && actuelNb > 0 && nouveauNb < Math.max(1, actuelNb * 0.5)) {
+          return new Response(JSON.stringify({
+            error: 'refus_ecrasement', cloud: actuelNb, envoye: nouveauNb,
+            message: 'La sauvegarde envoyée contient beaucoup moins de données que celle du cloud.'
+          }), { status: 409, headers: cors(env, { 'Content-Type': 'application/json' }) });
+        }
+
+        // on archive la version actuelle avant de la remplacer (6 dernières conservées)
+        if (actuel) {
+          const ts = Date.now().toString();
+          await env.BACKUPS.put(key + ':hist:' + ts, actuel);
+          let idx = [];
+          try { idx = JSON.parse(await env.BACKUPS.get(key + ':index') || '[]'); } catch (e) { }
+          idx.unshift({ ts, count: actuelNb, size: actuel.length, date: new Date().toISOString() });
+          for (const vieux of idx.slice(6)) await env.BACKUPS.delete(key + ':hist:' + vieux.ts);
+          idx = idx.slice(0, 6);
+          await env.BACKUPS.put(key + ':index', JSON.stringify(idx));
+        }
+
         await env.BACKUPS.put(key, body);
-        await env.BACKUPS.put(key + ':meta', JSON.stringify({ date: new Date().toISOString(), size: body.length }));
-        return new Response(JSON.stringify({ ok: true }), { headers: cors(env, { 'Content-Type': 'application/json' }) });
-      }
-      if (request.method === 'GET') {
-        const data = await env.BACKUPS.get(key);
-        if (!data) return new Response('Aucune sauvegarde trouvée pour cette phrase secrète', { status: 404, headers: cors(env) });
-        return new Response(data, { headers: cors(env, { 'Content-Type': 'application/json' }) });
+        await env.BACKUPS.put(key + ':meta', JSON.stringify({ date: new Date().toISOString(), size: body.length, count: nouveauNb }));
+        return new Response(JSON.stringify({ ok: true, count: nouveauNb }), { headers: cors(env, { 'Content-Type': 'application/json' }) });
       }
     }
 

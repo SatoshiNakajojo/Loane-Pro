@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.1.0';
+const APP_VERSION = '3.2.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -44,14 +44,19 @@ const KINDS = {
 
 // ====== Réglages par défaut ======
 const DEFAULT_FORFAITS = [
-  { label: "Cours à l\u2019unité", lessons: 1, price: 5000, validity: 2, from: 'first' },
-  { label: "Forfait 4 cours ancien élève", lessons: 4, price: 18000, validity: 2, from: 'first' },
-  { label: "Forfait 4 cours nouvel élève Do", lessons: 4, price: 20000, validity: 2, from: 'first' },
-  { label: "Cours à l\u2019unité hors forfait Do", lessons: 1, price: 6000, validity: 2, from: 'first' },
-  { label: "Bon cadeau 1 cours", lessons: 1, price: 5000, validity: 6, from: 'purchase' },
-  { label: "Bon cadeau 4 cours", lessons: 4, price: 18000, validity: 6, from: 'purchase' },
-  { label: "Bon cadeau 8 cours", lessons: 8, price: 36000, validity: 6, from: 'purchase' }
+  { label: "Cours à l\u2019unité (1 h)", hours: 1, price: 5000, validity: 2, from: 'first' },
+  { label: "Forfait 4 h ancien élève", hours: 4, price: 18000, validity: 2, from: 'first' },
+  { label: "Forfait 4 h nouvel élève Do", hours: 4, price: 20000, validity: 2, from: 'first' },
+  { label: "Cours à l\u2019unité hors forfait Do (1 h)", hours: 1, price: 6000, validity: 2, from: 'first' },
+  { label: "Bon cadeau 1 h", hours: 1, price: 5000, validity: 6, from: 'purchase' },
+  { label: "Bon cadeau 4 h", hours: 4, price: 18000, validity: 6, from: 'purchase' },
+  { label: "Bon cadeau 8 h", hours: 8, price: 36000, validity: 6, from: 'purchase' }
 ];
+
+// compatibilité : anciens forfaits/paiements exprimés en nombre de cours (1 cours = 1 h)
+const forfaitHeures = f => f.hours != null ? f.hours : (f.lessons || 1);
+const paiementMinutes = p => Math.round((p.hoursCovered != null ? p.hoursCovered : (p.lessonsCovered || 1)) * 60);
+const estCollectif = l => /collectif/i.test(l.type || '');
 const DEFAULT_TYPES = ['Cours de chant individuel', 'Cours collectif', 'Coaching scénique', 'Atelier découverte'];
 const DEFAULT_COLLECTORS = ['Loane', 'École de chant'];
 
@@ -202,30 +207,69 @@ const Cloud = {
   get pass() { return localStorage.getItem('cloud_pass') || ''; },
   set pass(v) { v ? localStorage.setItem('cloud_pass', v) : localStorage.removeItem('cloud_pass'); },
   get lastBackup() { return +(localStorage.getItem('cloud_last') || 0); },
-  async backup(silent) {
+
+  // nombre d'enregistrements réels (hors réglages)
+  async localCount() {
+    let n = 0;
+    for (const k of ['students', 'lessons', 'payments', 'notes', 'invoices', 'library']) n += (await DB.all(k)).length;
+    return n;
+  },
+
+  async backup(silent, force) {
     if (!WORKER_URL || !this.pass) { if (!silent) toast('Configure la phrase secrète'); return false; }
+    const n = await this.localCount();
+    // sécurité locale : on n'envoie jamais une base vide par-dessus une sauvegarde existante
+    if (n === 0 && this.lastBackup && !force) {
+      if (!silent) toast('Base vide : envoi bloqué pour protéger le cloud');
+      console.warn('sauvegarde annulée : base locale vide');
+      return false;
+    }
     try {
-      const r = await fetch(WORKER_URL + '/backup', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Backup-Key': this.pass },
-        body: JSON.stringify(await DB.exportAll())
-      });
+      const entetes = { 'Content-Type': 'application/json', 'X-Backup-Key': this.pass };
+      if (force) entetes['X-Force'] = '1';
+      const r = await fetch(WORKER_URL + '/backup', { method: 'PUT', headers: entetes, body: JSON.stringify(await DB.exportAll()) });
+      if (r.status === 409) {
+        const d = await r.json().catch(() => ({}));
+        toast(`Envoi refusé : ${d.envoye} contre ${d.cloud} dans le cloud`);
+        return false;
+      }
       if (!r.ok) throw new Error(await r.text());
       localStorage.setItem('cloud_last', Date.now());
       if (!silent) toast('Sauvegardé dans le cloud ✓');
       return true;
     } catch (e) { if (!silent) toast('Échec de la sauvegarde'); return false; }
   },
-  async restore() {
-    if (!WORKER_URL || !this.pass) { toast('Renseigne la phrase secrète'); return; }
-    if (!confirm('Restaurer la sauvegarde cloud ?')) return;
+
+  async lire(ts) {
+    const url = WORKER_URL + '/backup' + (ts ? '?ts=' + encodeURIComponent(ts) : '');
+    const r = await fetch(url, { headers: { 'X-Backup-Key': this.pass } });
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error('lecture impossible');
+    return r.json();
+  },
+
+  async historique() {
+    if (!WORKER_URL || !this.pass) return [];
     try {
-      const r = await fetch(WORKER_URL + '/backup', { headers: { 'X-Backup-Key': this.pass } });
-      if (r.status === 404) { toast('Aucune sauvegarde trouvée'); return; }
-      if (!r.ok) throw new Error();
-      await DB.importAll(await r.json());
-      toast('Sauvegarde restaurée ✓'); refreshView();
+      const r = await fetch(WORKER_URL + '/backup?list=1', { headers: { 'X-Backup-Key': this.pass } });
+      return r.ok ? await r.json() : [];
+    } catch (e) { return []; }
+  },
+
+  async restore(ts) {
+    if (!WORKER_URL || !this.pass) { toast('Renseigne la phrase secrète'); return; }
+    try {
+      const data = await this.lire(ts);
+      if (!data) { toast('Aucune sauvegarde trouvée'); return; }
+      let n = 0;
+      for (const k of Object.keys(data)) if (Array.isArray(data[k]) && k !== 'settings') n += data[k].length;
+      if (!confirm(`Restaurer ${n} enregistrement(s) ?\n\nIls seront ajoutés à ce qui est déjà sur l\u2019appareil.`)) return;
+      await DB.importAll(data);
+      toast('Restauré : ' + n + ' enregistrement(s) ✓');
+      refreshView();
     } catch (e) { toast('Échec de la restauration'); }
   },
+
   auto() {
     if (WORKER_URL && this.pass && Date.now() - this.lastBackup > 24 * 3600 * 1000) setTimeout(() => this.backup(true), 5000);
   }
@@ -278,28 +322,37 @@ function addMonths(d, m) { const x = new Date(d); x.setMonth(x.getMonth() + m); 
 
 // État des paiements + validité des forfaits
 async function paymentStatus(student) {
-  const lessons = (await lessonsOf(student.id)).filter(l => (l.kind || 'cours') === 'cours');
+  const seances = (await lessonsOf(student.id)).filter(l => (l.kind || 'cours') === 'cours');
   const payments = (await DB.byStudent('payments', student.id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const now = Date.now();
-  const done = lessons.filter(l => new Date(l.date) <= now && l.paid !== false);
+
+  // les cours collectifs et les cours offerts ne consomment pas le forfait
+  const decomptables = seances.filter(l => l.paid !== false && !estCollectif(l));
+  const faits = decomptables.filter(l => new Date(l.date) <= now);
+  const dureeTotale = l => l.duration || 60;
+
   const last = payments[0];
-  if (!last) return { last: null, due: done.length > 0, remaining: -done.length, expiry: null, expired: false };
+  const aucuneActivite = seances.length === 0 && payments.length === 0;
 
-  const used = done.filter(l => new Date(l.date) > new Date(last.date)).length;   // les cours offerts sont exclus plus haut
-  const remaining = (last.lessonsCovered || 1) - used;
+  if (!last) {
+    const dus = faits.reduce((a, l) => a + dureeTotale(l), 0);
+    return { last: null, due: dus > 0, remainingMin: -dus, expiry: null, expired: false, aucuneActivite };
+  }
 
-  // Validité : depuis l'achat (bon cadeau) ou depuis le 1er cours du forfait
+  const consomme = faits.filter(l => new Date(l.date) > new Date(last.date)).reduce((a, l) => a + dureeTotale(l), 0);
+  const remainingMin = paiementMinutes(last) - consomme;
+
   let expiry = null;
-  const months = last.validityMonths || 0;
-  if (months) {
-    if (last.validityFrom === 'purchase') expiry = addMonths(last.date, months);
+  const mois = last.validityMonths || 0;
+  if (mois) {
+    if (last.validityFrom === 'purchase') expiry = addMonths(last.date, mois);
     else {
-      const first = lessons.find(l => new Date(l.date) > new Date(last.date));
-      expiry = first ? addMonths(first.date, months) : null;   // null = pas encore démarré
+      const premier = decomptables.find(l => new Date(l.date) > new Date(last.date));
+      expiry = premier ? addMonths(premier.date, mois) : null;
     }
   }
   const expired = expiry ? Date.now() > expiry.getTime() : false;
-  return { last, due: remaining <= 0 || expired, remaining, expiry, expired, notStarted: months && !expiry };
+  return { last, due: remainingMin <= 0 || expired, remainingMin, expiry, expired, aucuneActivite, notStarted: mois && !expiry };
 }
 
 // ====== Navigation ======
@@ -770,17 +823,19 @@ async function renderStudents() {
   const cartes = [];
   for (const s of students) {
     const st = await paymentStatus(s);
-    let badge;
-    if (!st.last) badge = '<span class="badge due">À encaisser</span>';
+    let badge = '';
+    if (st.aucuneActivite) badge = '<span class="badge ghost">Nouvel élève</span>';
+    else if (!st.last) badge = st.due ? '<span class="badge due">À encaisser</span>' : '';
     else if (st.expired) badge = '<span class="badge due">Forfait expiré</span>';
-    else if (st.remaining <= 0) badge = '<span class="badge due">À encaisser</span>';
-    else badge = `<span class="badge ok">${st.remaining} cours</span>`;
+    else if (st.remainingMin <= 0) badge = '<span class="badge due">À encaisser</span>';
+    else badge = `<span class="badge ok">${fmtHours(st.remainingMin)}</span>`;
     cartes.push({
       cle: [s.name, s.phone, s.email, s.level, descriptionOf(s)].filter(Boolean).join(' ').toLowerCase(),
       html: `<div class="card tappable row" data-student="${s.id}">
         ${s.photo ? `<img class="avatar" src="${s.photo}">` : `<div class="avatar">${initials(s.name)}</div>`}
         <div class="grow"><div class="title">${esc(s.name)}</div>
-        <div class="sub">${st.last ? (st.expiry ? 'Valable jusqu\u2019au ' + fmtDateFull(st.expiry) : 'Forfait non démarré') : 'Aucun paiement'}</div></div>
+        <div class="sub">${st.aucuneActivite ? 'Aucun cours enregistré'
+          : st.last ? (st.expiry ? 'Valable jusqu\u2019au ' + fmtDateFull(st.expiry) : 'Forfait non démarré') : 'Aucun paiement'}</div></div>
         <div class="right">${badge}</div><div class="chev">›</div></div>`
     });
   }
@@ -826,9 +881,10 @@ async function renderStudentDetail(id) {
       <h3 style="margin-top:8px;font-size:1.3rem">${esc(s.name)}</h3>
       <div class="sub">${esc([s.phone, s.email].filter(Boolean).join(' · '))}</div>
       <div style="margin-top:8px">
-        ${st.expired ? '<span class="badge due">Forfait expiré</span>'
-      : st.remaining > 0 ? `<span class="badge ok">${st.remaining} cours restant${st.remaining > 1 ? 's' : ''}</span>`
-        : '<span class="badge due">Paiement attendu</span>'}
+        ${st.aucuneActivite ? '<span class="badge ghost">Nouvel élève</span>'
+      : st.expired ? '<span class="badge due">Forfait expiré</span>'
+        : st.remainingMin > 0 ? `<span class="badge ok">${fmtHours(st.remainingMin)} restante${st.remainingMin > 60 ? 's' : ''}</span>`
+          : st.due ? '<span class="badge due">Paiement attendu</span>' : ''}
         ${st.expiry && !st.expired ? `<span class="badge warn">jusqu\u2019au ${fmtDateFull(st.expiry)}</span>` : ''}
         ${st.notStarted ? '<span class="badge info">démarre au 1er cours</span>' : ''}
       </div>
@@ -853,7 +909,7 @@ async function renderStudentDetail(id) {
 
     <h2 class="section">Paiements</h2>
     <button class="btn secondary" id="add-pay" style="margin-top:0">＋ Enregistrer un paiement</button>
-    ${payments.map(p => `<div class="card tappable row" data-pay="${p.id}"><div class="grow"><div class="title">${fmtMoney(p.amount)} — ${p.lessonsCovered} cours</div>
+    ${payments.map(p => `<div class="card tappable row" data-pay="${p.id}"><div class="grow"><div class="title">${fmtMoney(p.amount)} — ${fmtHours(paiementMinutes(p))}</div>
       <div class="sub">${esc(p.label || '')} · ${fmtDateFull(p.date)}${p.method ? ' · ' + esc(p.method) : ''}</div></div>
       ${p.collectedBy ? `<span class="badge ghost">${esc(p.collectedBy)}</span>` : ''}<div class="chev">›</div></div>`).join('')}
 
@@ -954,7 +1010,7 @@ async function sheetPayment(studentId, payId) {
       </select></label>
     <div class="field-row">
       <label class="field"><span>Montant</span><input type="number" id="f-amount" value="${p ? p.amount : f0.price}"></label>
-      <label class="field"><span>Nb de cours</span><input type="number" id="f-count" value="${p ? p.lessonsCovered : f0.lessons}"></label>
+      <label class="field"><span>Heures achetées</span><input type="number" id="f-count" step="0.5" value="${p ? (p.hoursCovered != null ? p.hoursCovered : (p.lessonsCovered || 1)) : forfaitHeures(f0)}"></label>
     </div>
     <div class="field-row">
       <label class="field"><span>Validité (mois)</span><input type="number" id="f-valid" value="${p ? (p.validityMonths || 0) : (f0.validity || 2)}"></label>
@@ -978,7 +1034,7 @@ async function sheetPayment(studentId, payId) {
   $('#f-forfait').onchange = e => {
     const f = forfaits[+e.target.value];
     if (!f) return;
-    $('#f-amount').value = f.price; $('#f-count').value = f.lessons;
+    $('#f-amount').value = f.price; $('#f-count').value = forfaitHeures(f);
     $('#f-valid').value = f.validity || 0; $('#f-from').value = f.from || 'first';
   };
 
@@ -988,7 +1044,7 @@ async function sheetPayment(studentId, payId) {
     await DB.put('payments', {
       id: p ? p.id : DB.uid(), studentId,
       amount: +$('#f-amount').value,
-      lessonsCovered: +$('#f-count').value || 1,
+      hoursCovered: +$('#f-count').value || 1,
       validityMonths: +$('#f-valid').value || 0,
       validityFrom: $('#f-from').value,
       label: f ? f.label : (p ? p.label : ''),
@@ -1269,7 +1325,7 @@ async function sheetPiece(id) {
 const STORES = [
   { key: 'students', label: 'Élèves', sum: r => r.name },
   { key: 'lessons', label: 'Séances', sum: r => `${fmtDateFull(r.date)} · ${(KINDS[r.kind || 'cours'] || {}).label || ''}` },
-  { key: 'payments', label: 'Paiements', sum: r => `${fmtMoney(r.amount)} · ${fmtDateFull(r.date)}` },
+  { key: 'payments', label: 'Paiements', sum: r => `${fmtMoney(r.amount)} · ${fmtHours(paiementMinutes(r))} · ${fmtDateFull(r.date)}` },
   { key: 'notes', label: 'Notes de cours', sum: r => `${fmtDateFull(r.date)} · ${(r.text || '').slice(0, 40)}` },
   { key: 'invoices', label: 'Factures & devis', sum: r => `${r.kind === 'devis' ? 'Devis' : 'Facture'} ${r.number} · ${fmtMoney(r.total)}` },
   { key: 'library', label: 'Répertoire', sum: r => r.title },
@@ -1431,6 +1487,9 @@ async function settingsData() {
     <button class="btn secondary" id="cl-check">🔍 Comparer avec le cloud</button>
     ${cloudSnapshot ? '<div class="sub" style="text-align:center;margin-top:6px">Comparaison faite à l\u2019instant.</div>' : ''}
 
+    <h2 class="section">Historique cloud</h2>
+    <div class="card" id="hist-box"><div class="sub">Chargement…</div></div>
+
     <h2 class="section">Fichier de sauvegarde</h2>
     <div class="card">
       <button class="btn secondary" id="bk-export">Exporter (JSON)</button>
@@ -1440,6 +1499,7 @@ async function settingsData() {
   bindBack();
 
   view.querySelectorAll('[data-store]').forEach(tr => tr.onclick = () => sheetStoreList(tr.dataset.store));
+  dessineHistorique();
 
   const clSave = $('#cl-save');
   if (clSave) {
@@ -1447,7 +1507,11 @@ async function settingsData() {
       const p = $('#cl-pass').value.trim();
       if (p.length < 6) { toast('6 caractères minimum'); return; }
       Cloud.pass = p; clSave.textContent = 'Sauvegarde…';
-      await Cloud.backup(false); Cloud.pending = false; renderSettings();
+      const ok = await Cloud.backup(false);
+      if (!ok && await Cloud.localCount() >= 0) {
+        if (confirm('L\u2019envoi a été refusé ou a échoué.\n\nForcer l\u2019envoi de la base actuelle (écrase le cloud) ?')) await Cloud.backup(false, true);
+      }
+      Cloud.pending = false; renderSettings();
     };
     $('#cl-restore').onclick = async () => {
       const p = $('#cl-pass').value.trim();
@@ -1480,6 +1544,20 @@ async function settingsData() {
     try { await DB.importAll(JSON.parse(await f.text())); toast('Restauré ✓'); renderSettings(); }
     catch (err) { toast('Fichier invalide'); }
   };
+}
+
+// Les 6 dernières versions conservées dans le cloud
+async function dessineHistorique() {
+  const box = $('#hist-box'); if (!box) return;
+  if (!WORKER_URL || !Cloud.pass) { box.innerHTML = '<div class="sub">Phrase secrète non renseignée.</div>'; return; }
+  const list = await Cloud.historique();
+  if (!list.length) { box.innerHTML = '<div class="sub">Aucune version antérieure archivée pour l\u2019instant.</div>'; return; }
+  box.innerHTML = `<div class="sub" style="margin-bottom:8px">Versions précédentes conservées automatiquement. En cas de fausse manœuvre, tu peux revenir à l\u2019une d\u2019elles.</div>`
+    + list.map(h => `<div class="editrow">
+        <div class="grow"><div class="title">${h.count} enregistrement(s)</div>
+        <div class="sub">${new Date(h.date).toLocaleString('fr-FR')}</div></div>
+        <button class="btn-inline" data-hist="${h.ts}">Restaurer</button></div>`).join('');
+  box.querySelectorAll('[data-hist]').forEach(b => b.onclick = () => Cloud.restore(b.dataset.hist));
 }
 
 // Liste des enregistrements d'une catégorie
@@ -1578,7 +1656,7 @@ async function drawForfaits() {
   const box = $('#forfaits-box'); if (!box) return;
   box.innerHTML = forfaits.map((f, i) => `<div class="editrow">
       <div class="grow"><div class="title">${esc(f.label)}</div>
-        <div class="sub">${f.lessons} cours · ${fmtMoney(f.price)}${f.validity ? ' · valable ' + f.validity + ' mois ' + (f.from === 'purchase' ? 'dès l\u2019achat' : 'dès le 1er cours') : ''}</div></div>
+        <div class="sub">${forfaitHeures(f)} h · ${fmtMoney(f.price)}${f.validity ? ' · valable ' + f.validity + ' mois ' + (f.from === 'purchase' ? 'dès l\u2019achat' : 'dès le 1er cours') : ''}</div></div>
       <button class="icon-btn edit" data-edit-f="${i}" title="Modifier">✎</button>
       <button class="icon-btn" data-del-f="${i}" title="Supprimer">✕</button></div>`).join('')
     + `<button class="btn secondary" id="add-forfait">＋ Ajouter un forfait</button>
@@ -1600,12 +1678,12 @@ async function drawForfaits() {
 
 async function sheetForfait(index) {
   const forfaits = await DB.getSetting('forfaits', DEFAULT_FORFAITS);
-  const f = index === null ? { label: '', lessons: 1, price: 0, validity: 2, from: 'first' } : forfaits[index];
+  const f = index === null ? { label: '', hours: 1, price: 0, validity: 2, from: 'first' } : forfaits[index];
   openSheet(`
     <h3>${index === null ? 'Nouveau forfait' : 'Modifier le forfait'}</h3>
     <label class="field"><span>Libellé</span><input id="ff-label" value="${esc(f.label)}"></label>
     <div class="field-row">
-      <label class="field"><span>Nombre de cours</span><input type="number" id="ff-lessons" value="${f.lessons}"></label>
+      <label class="field"><span>Heures incluses</span><input type="number" step="0.5" id="ff-hours" value="${forfaitHeures(f)}"></label>
       <label class="field"><span>Prix</span><input type="number" id="ff-price" value="${f.price}"></label>
     </div>
     <div class="field-row">
@@ -1622,7 +1700,7 @@ async function sheetForfait(index) {
   $('#ff-save').onclick = async () => {
     const label = $('#ff-label').value.trim();
     if (!label) { toast('Le libellé est obligatoire'); return; }
-    const item = { label, lessons: +$('#ff-lessons').value || 1, price: +$('#ff-price').value || 0,
+    const item = { label, hours: +$('#ff-hours').value || 1, price: +$('#ff-price').value || 0,
                    validity: +$('#ff-valid').value || 0, from: $('#ff-from').value };
     const list = [...forfaits];
     if (index === null) list.push(item); else list[index] = item;
