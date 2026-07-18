@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.5.0';
+const APP_VERSION = '2.6.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -53,12 +53,14 @@ const DEFAULT_FORFAITS = [
   { label: "Bon cadeau 8 cours", lessons: 8, price: 36000, validity: 6, from: 'purchase' }
 ];
 const DEFAULT_TYPES = ['Cours de chant individuel', 'Cours collectif', 'Coaching scénique', 'Atelier découverte'];
+const DEFAULT_COLLECTORS = ['Loane', 'École de chant'];
 
 async function getConfig() {
   const courseTypes = await DB.getSetting('courseTypes', DEFAULT_TYPES);
   const forfaits = await DB.getSetting('forfaits', DEFAULT_FORFAITS);
   const business = await DB.getSetting('business', { name: '', address: '', siret: '', email: '', phone: '', iban: '', footer: '' });
-  return { courseTypes, forfaits, business };
+  const collectors = await DB.getSetting('collectors', DEFAULT_COLLECTORS);
+  return { courseTypes, forfaits, business, collectors };
 }
 
 // ====== Verrouillage ======
@@ -400,7 +402,7 @@ async function renderAgenda() {
 function viewList(items) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const up = items.filter(i => new Date(i.date) >= today);
-  if (!up.length) return `<div class="empty"><div class="big">🎶</div>Aucun cours à venir.<br>Touche ＋ pour en ajouter.</div>`;
+  if (!up.length) return `<div class="empty"><div class="big">🎶</div><div class="empty-title">Aucun cours à venir</div>Touche ＋ pour en ajouter.</div>`;
   let html = '', cur = '';
   for (const it of up) {
     const key = new Date(it.date).toDateString();
@@ -663,7 +665,7 @@ async function renderHours() {
 
   html += `<button class="btn secondary" id="add-act">＋ Ajouter une répétition / un concert</button>`;
 
-  if (!inRange.length) html += `<div class="empty"><div class="big">⏱️</div>Aucune séance sur la période.</div>`;
+  if (!inRange.length) html += `<div class="empty"><div class="big">⏱️</div><div class="empty-title">Aucune séance</div>Rien sur la période choisie.</div>`;
   else {
     html += `<h2 class="section">Détail (${inRange.length})</h2>`;
     let curDay = '';
@@ -688,7 +690,7 @@ async function renderHours() {
 async function renderStudents() {
   const students = (await DB.all('students')).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
   if (!students.length) {
-    view.innerHTML = `<div class="empty"><div class="big">🎤</div>Aucun élève.<br>Touche ＋ pour créer un profil.</div>`;
+    view.innerHTML = `<div class="empty"><div class="big">🎤</div><div class="empty-title">Aucun élève</div>Touche ＋ pour créer un profil.</div>`;
     return;
   }
   let html = '';
@@ -758,7 +760,8 @@ async function renderStudentDetail(id) {
     <h2 class="section">Paiements</h2>
     <button class="btn secondary" id="add-pay" style="margin-top:0">＋ Enregistrer un paiement</button>
     ${payments.map(p => `<div class="card row"><div class="grow"><div class="title">${fmtMoney(p.amount)} — ${p.lessonsCovered} cours</div>
-      <div class="sub">${esc(p.label || '')} · ${fmtDateFull(p.date)}${p.method ? ' · ' + esc(p.method) : ''}</div></div></div>`).join('')}
+      <div class="sub">${esc(p.label || '')} · ${fmtDateFull(p.date)}${p.method ? ' · ' + esc(p.method) : ''}</div></div>
+      ${p.collectedBy ? `<span class="badge ghost">${esc(p.collectedBy)}</span>` : ''}</div>`).join('')}
 
     <h2 class="section">Prochains cours</h2>
     <button class="btn secondary" id="add-lesson" style="margin-top:0">＋ Planifier un cours</button>
@@ -830,7 +833,7 @@ async function sheetStudent(id) {
 }
 
 async function sheetPayment(studentId) {
-  const { forfaits } = await getConfig();
+  const { forfaits, collectors } = await getConfig();
   openSheet(`
     <h3>Enregistrer un paiement</h3>
     <label class="field"><span>Forfait</span>
@@ -846,8 +849,10 @@ async function sheetPayment(studentId) {
     </div>
     <div class="field-row">
       <label class="field"><span>Date</span><input type="date" id="f-date" value="${new Date().toISOString().slice(0, 10)}"></label>
-      <label class="field"><span>Moyen</span><select id="f-method"><option>Espèces</option><option>Virement</option><option>Chèque</option><option>Bon cadeau</option></select></label>
+      <label class="field"><span>Moyen</span><select id="f-method"><option>Chèque</option><option>Espèces</option><option>Virement</option><option>Bon cadeau</option></select></label>
     </div>
+    <label class="field"><span>Encaissé par</span>
+      <select id="f-by">${collectors.map(c => `<option>${esc(c)}</option>`).join('')}</select></label>
     <button class="btn" id="f-save">Enregistrer</button>
   `);
   const apply = () => {
@@ -865,7 +870,8 @@ async function sheetPayment(studentId) {
       validityMonths: +$('#f-valid').value || 0,
       validityFrom: $('#f-from').value,
       label: f ? f.label : '',
-      date: new Date($('#f-date').value).toISOString(), method: $('#f-method').value
+      date: new Date($('#f-date').value).toISOString(), method: $('#f-method').value,
+      collectedBy: $('#f-by').value
     });
     closeSheet(); toast('Paiement enregistré ✓'); renderStudentDetail(studentId);
   };
@@ -891,14 +897,45 @@ async function sheetNote(studentId, noteId) {
 async function renderBilling() {
   const invoices = (await DB.all('invoices')).sort((a, b) => new Date(b.date) - new Date(a.date));
   const students = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
-  if (!invoices.length) { view.innerHTML = `<div class="empty"><div class="big">🧾</div>Aucune facture ni devis.<br>Touche ＋ pour en créer.</div>`; return; }
-  view.innerHTML = invoices.map(inv => `
-    <div class="card tappable row" data-inv="${inv.id}">
+  const { collectors } = await getConfig();
+
+  if (!invoices.length) {
+    view.innerHTML = `<div class="empty"><div class="big">🧾</div>
+      <div class="empty-title">Aucune facture ni devis</div>Touche ＋ pour en créer.</div>`;
+    return;
+  }
+
+  // Totaux : encaissé par qui, et reste à encaisser
+  const facts = invoices.filter(i => i.kind !== 'devis');
+  const parEncaisseur = {};
+  let attente = 0;
+  for (const f of facts) {
+    if (f.paid) parEncaisseur[f.paidBy || '—'] = (parEncaisseur[f.paidBy || '—'] || 0) + f.total;
+    else attente += f.total;
+  }
+
+  let html = '';
+  if (facts.length) {
+    html += `<div class="card"><div class="sub" style="margin-bottom:8px">Encaissements</div>
+      ${Object.entries(parEncaisseur).map(([who, amt]) => `<div class="row" style="padding:3px 0">
+        <div class="grow">${esc(who)}</div><div class="title">${fmtMoney(amt)}</div></div>`).join('') || '<div class="sub">Rien d\u2019encaissé pour l\u2019instant.</div>'}
+      ${attente ? `<hr class="staff"><div class="row"><div class="grow title">Reste à encaisser</div>
+        <div class="title" style="color:var(--danger)">${fmtMoney(attente)}</div></div>` : ''}
+    </div>`;
+  }
+
+  html += invoices.map(inv => {
+    const st = inv.kind === 'devis' ? '<span class="badge gold">Devis</span>'
+      : inv.paid ? `<span class="badge ok">Encaissé · ${esc(inv.paidBy || '')}</span>`
+        : '<span class="badge due">À encaisser</span>';
+    return `<div class="card tappable row" data-inv="${inv.id}">
       <div class="grow"><div class="title">${inv.kind === 'devis' ? 'Devis' : 'Facture'} ${esc(inv.number)}</div>
       <div class="sub">${esc(students[inv.studentId] ? students[inv.studentId].name : '—')} · ${fmtDateFull(inv.date)}</div></div>
-      <div class="right"><div class="title">${fmtMoney(inv.total)}</div>
-      <span class="badge ${inv.kind === 'devis' ? 'gold' : 'info'}">${inv.kind === 'devis' ? 'Devis' : 'Facture'}</span></div>
-      <div class="chev">›</div></div>`).join('');
+      <div class="right"><div class="title">${fmtMoney(inv.total)}</div>${st}</div>
+      <div class="chev">›</div></div>`;
+  }).join('');
+
+  view.innerHTML = html;
   view.querySelectorAll('[data-inv]').forEach(el => el.onclick = () => sheetInvoiceView(el.dataset.inv));
 }
 
@@ -938,6 +975,7 @@ async function sheetInvoice() {
 async function sheetInvoiceView(id) {
   const inv = await DB.get('invoices', id);
   const student = await DB.get('students', inv.studentId);
+  const { collectors } = await getConfig();
   renderBilling();
   openSheet(`
     <h3>${inv.kind === 'devis' ? 'Devis' : 'Facture'} ${esc(inv.number)}</h3>
@@ -945,11 +983,50 @@ async function sheetInvoiceView(id) {
       <div class="sub">${fmtDateFull(inv.date)}</div><hr class="staff">
       ${inv.items.map(i => `<div class="row"><div class="grow sub">${esc(i.label)} × ${i.qty}</div><div class="title">${fmtMoney(i.qty * i.unitPrice)}</div></div>`).join('')}
       <div class="row" style="margin-top:8px"><div class="grow title">Total</div><div class="title" style="color:var(--green)">${fmtMoney(inv.total)}</div></div></div>
+
+    ${inv.kind === 'devis' ? '' : `
+    <h2 class="section">Encaissement</h2>
+    <div class="card">
+      ${inv.paid ? `<div class="row"><div class="grow">
+          <div class="title">Encaissé par ${esc(inv.paidBy || '—')}</div>
+          <div class="sub">${inv.paidDate ? 'le ' + fmtDateFull(inv.paidDate) : ''}${inv.paidMethod ? ' · ' + esc(inv.paidMethod) : ''}</div></div>
+          <span class="badge ok">Réglé</span></div>
+        <button class="btn ghost" id="f-unpaid">Annuler l\u2019encaissement</button>`
+      : `<div class="sub">Pas encore encaissée.</div>
+        <label class="field" style="margin-top:10px"><span>Encaissé par</span>
+          <select id="f-by">${collectors.map(c => `<option>${esc(c)}</option>`).join('')}</select></label>
+        <div class="field-row">
+          <label class="field"><span>Date</span><input type="date" id="f-paiddate" value="${new Date().toISOString().slice(0, 10)}"></label>
+          <label class="field"><span>Moyen</span>
+            <select id="f-paidmethod"><option>Chèque</option><option>Espèces</option><option>Virement</option><option>Bon cadeau</option></select></label>
+        </div>
+        <button class="btn" id="f-paid">Marquer comme encaissée</button>`}
+    </div>`}
+
     <button class="btn gold" id="f-print">Imprimer / PDF</button>
     <button class="btn danger" id="f-del">Supprimer</button>
   `);
+
+  const paidBtn = $('#f-paid');
+  if (paidBtn) paidBtn.onclick = async () => {
+    inv.paid = true;
+    inv.paidBy = $('#f-by').value;
+    inv.paidDate = new Date($('#f-paiddate').value).toISOString();
+    inv.paidMethod = $('#f-paidmethod').value;
+    await DB.put('invoices', inv);
+    toast('Encaissement enregistré ✓'); sheetInvoiceView(id);
+  };
+  const unpaidBtn = $('#f-unpaid');
+  if (unpaidBtn) unpaidBtn.onclick = async () => {
+    inv.paid = false; delete inv.paidBy; delete inv.paidDate; delete inv.paidMethod;
+    await DB.put('invoices', inv);
+    toast('Encaissement annulé'); sheetInvoiceView(id);
+  };
   $('#f-print').onclick = () => printInvoice(inv, student);
-  $('#f-del').onclick = async () => { await DB.del('invoices', id); closeSheet(); renderBilling(); };
+  $('#f-del').onclick = async () => {
+    if (!confirm('Supprimer ce document ?')) return;
+    await DB.del('invoices', id); closeSheet(); renderBilling();
+  };
 }
 
 async function printInvoice(inv, student) {
@@ -977,6 +1054,7 @@ async function printInvoice(inv, student) {
   <table><tr><th>Prestation</th><th class="num">Qté</th><th class="num">P.U.</th><th class="num">Total</th></tr>
   ${inv.items.map(i => `<tr><td>${esc(i.label)}</td><td class="num">${i.qty}</td><td class="num">${fmtMoney(i.unitPrice)}</td><td class="num">${fmtMoney(i.qty * i.unitPrice)}</td></tr>`).join('')}
   <tr><td colspan="3" class="total">TOTAL</td><td class="num total">${fmtMoney(inv.total)}</td></tr></table>
+  ${inv.paid ? '<div style="margin-top:14px"><strong>Réglée le ' + fmtDateFull(inv.paidDate) + '</strong> — encaissement : ' + esc(inv.paidBy || '') + (inv.paidMethod ? ' (' + esc(inv.paidMethod) + ')' : '') + '</div>' : ''}
   ${business.iban ? '<div>Règlement : ' + esc(business.iban) + '</div>' : ''}
   <div class="footer">${esc(business.footer || '')}${inv.kind === 'devis' ? '<br>Devis valable 30 jours.' : ''}</div>
   <script>setTimeout(()=>window.print(),300)<\/script></body></html>`);
@@ -987,7 +1065,7 @@ async function printInvoice(inv, student) {
 async function renderLibrary() {
   const pieces = (await DB.all('library')).sort((a, b) => a.title.localeCompare(b.title, 'fr'));
   let html = `<input id="lib-search" placeholder="🔍 Rechercher un morceau, un artiste, un tag…" style="margin-bottom:12px">`;
-  if (!pieces.length) html += `<div class="empty"><div class="big">🎼</div>Répertoire vide.<br>Touche ＋ pour ajouter un morceau.</div>`;
+  if (!pieces.length) html += `<div class="empty"><div class="big">🎼</div><div class="empty-title">Répertoire vide</div>Touche ＋ pour ajouter un morceau.</div>`;
   html += `<div id="lib-list"></div>`;
   view.innerHTML = html;
   const list = $('#lib-list');
@@ -1112,6 +1190,9 @@ async function renderSettings() {
     <h2 class="section">Forfaits & tarifs</h2>
     <div class="card" id="forfaits-box"></div>
 
+    <h2 class="section">Encaissement</h2>
+    <div class="card" id="collectors-box"></div>
+
     <h2 class="section">Sauvegarde locale</h2>
     <div class="card">
       <button class="btn secondary" id="bk-export">Exporter un fichier (JSON)</button>
@@ -1152,7 +1233,7 @@ async function renderSettings() {
     CURRENCY = $('#b-cur').value; await DB.setSetting('currency', CURRENCY);
     toast('Enregistré ✓'); renderSettings();
   };
-  await drawTypes(); await drawForfaits();
+  await drawTypes(); await drawForfaits(); await drawCollectors();
 
   $('#bk-export').onclick = async () => {
     const blob = new Blob([JSON.stringify(await DB.exportAll())], { type: 'application/json' });
@@ -1169,6 +1250,27 @@ async function renderSettings() {
   };
 }
 
+
+// --- Qui encaisse (Loane, l'école…) ---
+async function drawCollectors() {
+  const list = await DB.getSetting('collectors', DEFAULT_COLLECTORS);
+  const box = $('#collectors-box'); if (!box) return;
+  box.innerHTML = `<div class="sub" style="margin-bottom:6px">Personnes ou structures pouvant encaisser un règlement.</div>`
+    + list.map((c, i) => `<div class="editrow"><div class="grow">${esc(c)}</div>
+        <button class="icon-btn" data-del-c="${i}">✕</button></div>`).join('')
+    + `<button class="btn secondary" id="add-collector">＋ Ajouter</button>`;
+  box.querySelectorAll('[data-del-c]').forEach(b => b.onclick = async () => {
+    if (list.length <= 1) { toast('Il en faut au moins un'); return; }
+    const l2 = [...list]; l2.splice(+b.dataset.delC, 1);
+    await DB.setSetting('collectors', l2); toast('Supprimé'); drawCollectors();
+  });
+  $('#add-collector').onclick = async () => {
+    const name = prompt('Nom (ex. : Loane, École de chant) :');
+    if (!name || !name.trim()) return;
+    await DB.setSetting('collectors', [...list, name.trim()]);
+    toast('Ajouté ✓'); drawCollectors();
+  };
+}
 
 // --- Listes éditables : types de cours & forfaits ---
 async function drawTypes() {
