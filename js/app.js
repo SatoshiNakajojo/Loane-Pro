@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '2.3.0';
+const APP_VERSION = '2.3.1';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -79,6 +79,7 @@ const Lock = {
   },
   buffer: '',
   show() {
+    if (!this.enabled) { this.hide(); return; }   // aucun code défini : jamais de blocage
     this.buffer = '';
     document.body.classList.add('locked');
     $('#lock').hidden = false;
