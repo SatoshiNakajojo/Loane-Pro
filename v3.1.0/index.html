@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>Loane Pro</title>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Loane Pro">
+<link rel="apple-touch-icon" href="icons/icon-180-v5.png">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0C1A12">
+<link rel="preload" as="image" href="icons/bird.png">
+<link rel="preload" as="image" href="icons/glitter-dark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Jost:wght@300;400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+
+<!-- Écran de lancement -->
+<div id="splash">
+  <img src="icons/bird.png" alt="Loane Pro" class="splash-bird">
+  <div class="splash-name">Loane Pro</div>
+  <div class="splash-bar"><i></i></div>
+  <div class="splash-version" id="splash-version"></div>
+</div>
+
+<!-- Écran de verrouillage -->
+<div id="lock" hidden>
+  <img src="icons/bird.png" alt="" class="lock-bird">
+  <div class="lock-title">Code d'accès</div>
+  <div class="lock-dots" id="lock-dots"></div>
+  <div class="lock-msg" id="lock-msg"></div>
+  <div class="keypad" id="keypad">
+    <button>1</button><button>2</button><button>3</button>
+    <button>4</button><button>5</button><button>6</button>
+    <button>7</button><button>8</button><button>9</button>
+    <span></span><button>0</button><button data-del>⌫</button>
+  </div>
+</div>
+
+<header class="topbar">
+  <h1 id="page-title">Agenda</h1>
+  <div class="topbar-right">
+    <span id="cloud-state" class="cloud-state" hidden></span>
+    <button id="topbar-action" class="btn-icon" hidden>＋</button>
+  </div>
+</header>
+
+<main id="view"></main>
+
+<nav class="tabbar">
+  <button class="tab active" data-tab="agenda"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/><circle cx="12" cy="15" r="1.4" fill="currentColor" stroke="none"/></svg><span>Agenda</span></button>
+  <button class="tab" data-tab="students"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 14a4.5 4.5 0 0 0 4.5-4.5V7a4.5 4.5 0 1 0-9 0v2.5A4.5 4.5 0 0 0 12 14Z"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0M12 18v3M8.5 21h7"/></svg><span>Élèves</span></button>
+  <button class="tab" data-tab="hours"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12.5" r="8"/><path d="M12 8v4.8l3 1.8M9 2.5h6"/></svg><span>Heures</span></button>
+  <button class="tab" data-tab="billing"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h12v18l-3-1.8L12 21l-3-1.8L6 21Z"/><path d="M9.5 8h5M9.5 12h5"/></svg><span>Factures</span></button>
+  <button class="tab" data-tab="library"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.6"/><circle cx="16.5" cy="16" r="2.6"/></svg><span>Chants</span></button>
+  <button class="tab" data-tab="settings"><svg class="tab-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-2.87 1.2 2 2 0 1 1-4 0 1.7 1.7 0 0 0-2.87-1.2l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a2 2 0 1 1 0-4 1.7 1.7 0 0 0 1.2-2.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 11.5 4.6a2 2 0 1 1 4 0 1.7 1.7 0 0 0 2.87 1.2l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 11a2 2 0 1 1 0 4Z"/></svg><span>Réglages</span></button>
+</nav>
+
+<div id="sheet-backdrop" hidden></div>
+<div id="sheet" class="sheet" hidden></div>
+<div id="toast" hidden></div>
+
+<script src="js/config.js"></script>
+<script src="js/db.js"></script>
+<script src="js/app.js"></script>
+<script>
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+</body>
+</html>
