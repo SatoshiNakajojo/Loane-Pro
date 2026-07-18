@@ -1,12 +1,12 @@
 // Service worker — Loane Pro
 // Stratégie "réseau d'abord" : l'app se met à jour dès qu'il y a du réseau,
 // et reste utilisable hors ligne grâce au cache.
-const CACHE = 'loane-pro-2.3.1';
+const CACHE = 'loane-pro-2.3.2';
 const ASSETS = [
   './', './index.html', './css/app.css',
   './js/config.js', './js/db.js', './js/app.js',
   './manifest.webmanifest',
-  './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png', './icons/logo.png'
+  './icons/icon-180-v3.png', './icons/icon-192-v3.png', './icons/icon-512-v3.png', './icons/logo-v3.png'
 ];
 
 self.addEventListener('install', e => {
