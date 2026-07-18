@@ -6,6 +6,13 @@ compatibility_date = "2026-01-01"
 # Remplace par l'URL exacte de ton site GitHub Pages (sans / final)
 ALLOWED_ORIGIN = "https://TON-COMPTE.github.io"
 
-# Secrets à ajouter en ligne de commande (ne jamais les mettre ici) :
+# Stockage des sauvegardes cloud.
+# En ligne de commande : npx wrangler kv namespace create BACKUPS
+# puis colle l'id généré ci-dessous. (Via le tableau de bord : voir README, pas besoin de ce bloc.)
+[[kv_namespaces]]
+binding = "BACKUPS"
+id = "REMPLACE-PAR-TON-ID-KV"
+
+# Secrets à ajouter (jamais en clair ici) :
 #   npx wrangler secret put GOOGLE_CLIENT_ID
 #   npx wrangler secret put GOOGLE_CLIENT_SECRET

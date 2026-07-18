@@ -2,7 +2,7 @@
 
 Application web installable (PWA) pour une professeure de chant : agenda synchronisé avec Google Agenda, profils d'élèves avec photo, suivi des paiements, notes de cours, factures & devis, et répertoire de morceaux (paroles + partitions).
 
-L'app s'ouvre dans Safari puis s'installe sur l'écran d'accueil de l'iPhone comme une vraie application. Toutes les données (élèves, cours, paiements, notes, morceaux) sont stockées **directement sur le téléphone** — rien ne transite par un serveur, sauf la connexion à Google Agenda qui passe par un petit Worker Cloudflare.
+L'app s'ouvre dans Safari puis s'installe sur l'écran d'accueil de l'iPhone comme une vraie application. Toutes les données (élèves, cours, paiements, notes, morceaux) sont stockées **directement sur le téléphone** — le Worker Cloudflare sert à la connexion Google Agenda et à la **sauvegarde cloud** quotidienne (protégée par une phrase secrète).
 
 ---
 
@@ -47,21 +47,27 @@ La synchro nécessite deux choses : des identifiants Google (gratuits) et un Wor
      (tu connaîtras l'adresse exacte du worker à l'étape suivante — tu peux revenir la corriger)
 5. Note le **Client ID** et le **Client Secret**.
 
-### 3b. Déployer le Worker Cloudflare
+### 3b. Déployer le Worker Cloudflare — **sans ligne de commande** (tout dans le navigateur)
 
-1. Crée un compte gratuit sur [cloudflare.com](https://dash.cloudflare.com).
-2. Sur ton ordinateur, dans le dossier `worker/` :
-   ```bash
-   cd worker
-   # Modifie d'abord ALLOWED_ORIGIN dans wrangler.toml
-   # avec l'URL de ton site : https://TON-COMPTE.github.io
-   npx wrangler login
-   npx wrangler secret put GOOGLE_CLIENT_ID      # colle le Client ID
-   npx wrangler secret put GOOGLE_CLIENT_SECRET  # colle le Client Secret
-   npx wrangler deploy
-   ```
-3. Wrangler affiche l'URL du worker, par ex. `https://studio-vocal-auth.ton-compte.workers.dev`.
-   Vérifie que cette URL + `/auth/callback` est bien l'URI de redirection déclarée côté Google (étape 3a-4).
+1. Crée un compte gratuit sur [dash.cloudflare.com](https://dash.cloudflare.com).
+2. Dans le menu de gauche : **Workers & Pages** (ou « Compute ») → **Create** → **Create Worker** (modèle « Hello World »).
+3. Donne-lui le nom `studio-vocal-auth` → **Deploy**.
+4. Clique sur **Edit code** : efface tout le code affiché, **colle à la place le contenu complet du fichier `worker/worker.js`** de ce projet → **Deploy** (en haut à droite).
+5. Reviens sur la page du worker → onglet **Settings** :
+   - **Variables and Secrets → Add** :
+     - Type **Text** — nom `ALLOWED_ORIGIN` — valeur : l'URL de ton site, ex. `https://TON-COMPTE.github.io`
+     - Type **Secret** — nom `GOOGLE_CLIENT_ID` — valeur : le Client ID de l'étape 3a
+     - Type **Secret** — nom `GOOGLE_CLIENT_SECRET` — valeur : le Client Secret
+     - Clique **Deploy** pour appliquer.
+6. **Pour la sauvegarde cloud** (recommandé) :
+   - Menu de gauche → **Storage & Databases → KV** → **Create namespace** → nom : `studio-vocal-backups`.
+   - Retourne sur ton worker → **Settings → Bindings → Add → KV Namespace** :
+     - Variable name : `BACKUPS` (exactement en majuscules)
+     - Namespace : `studio-vocal-backups`
+     - **Deploy**.
+7. L'URL du worker est affichée sur sa page d'accueil, par ex. `https://studio-vocal-auth.ton-compte.workers.dev`. **Copie-la**, et vérifie côté Google (étape 3a-4) que l'URI de redirection est bien cette URL suivie de `/auth/callback`.
+
+> 💻 *Alternative pour développeurs* : le dossier `worker/` contient aussi un `wrangler.toml` pour déployer via `npx wrangler deploy` si tu préfères la ligne de commande (elle nécessite Node.js installé sur un ordinateur — c'est ce qui coince souvent, la méthode navigateur ci-dessus fait exactement la même chose).
 
 ### 3c. Brancher l'app sur le worker
 
@@ -95,8 +101,18 @@ Quand tu enregistres un paiement sur le profil d'un élève, tu indiques **combi
 - tant qu'il reste des cours payés → badge vert « X cours restants » ;
 - dès que le forfait est épuisé → badge rouge **« À encaisser »** dans la liste des élèves.
 
+## Sauvegarde cloud ☁️ — comment ça marche
+
+Une fois le worker déployé avec le stockage KV (étape 3b-6) et `WORKER_URL` renseigné dans `js/config.js` :
+
+1. Dans l'app : **Réglages → Sauvegarde cloud** → choisis une **phrase secrète** (6 caractères minimum, ex. `mimosa-vocalise-1987`).
+2. Touche **« Sauvegarder dans le cloud maintenant »**. Ensuite, l'app refait automatiquement une sauvegarde **une fois par jour** à l'ouverture.
+3. Sur un nouveau téléphone : installe l'app, saisis la même phrase secrète, puis **« Restaurer depuis le cloud »** — tout revient (élèves, cours, paiements, notes, factures, répertoire).
+
+La phrase secrète n'est jamais stockée en clair sur le serveur : elle sert de clé d'accès. **Note-la quelque part** — sans elle, la sauvegarde est irrécupérable.
+
 ## Limites à connaître
 
-- Les données sont **locales au téléphone** : fais des sauvegardes régulières (Réglages).
-- Les pièces jointes du répertoire sont limitées à ~8 Mo par fichier pour ne pas saturer le stockage.
+- Les pièces jointes du répertoire sont limitées à ~8 Mo par fichier, et la sauvegarde cloud à 20 Mo au total (largement suffisant sauf si tu stockes énormément de partitions PDF — dans ce cas garde aussi l'export JSON local).
 - La synchro Google fonctionne dans le sens app → Google en continu, et Google → app via le bouton « Synchroniser ».
+- La sauvegarde automatique a lieu au maximum une fois par 24 h, quand l'app est ouverte avec du réseau.

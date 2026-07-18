@@ -1,5 +1,5 @@
 // Service worker : cache l'app pour un usage hors ligne
-const CACHE = 'studio-vocal-v1';
+const CACHE = 'studio-vocal-v2';
 const ASSETS = [
   './', './index.html', './css/app.css',
   './js/config.js', './js/db.js', './js/app.js',

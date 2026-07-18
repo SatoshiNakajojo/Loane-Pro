@@ -514,14 +514,14 @@ async function printInvoice(inv, student) {
   const w = window.open('', '_blank');
   w.document.write(`<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>${inv.kind} ${inv.number}</title>
   <style>
-    body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#241E33;padding:40px;max-width:700px;margin:auto}
-    h1{font-size:1.6rem;color:#5B3E8F} .head{display:flex;justify-content:space-between;margin-bottom:30px}
-    .staff{height:9px;background:repeating-linear-gradient(to bottom,#C99A22 0 1px,transparent 1px 3px);margin:16px 0 30px}
+    body{font-family:-apple-system,Helvetica,Arial,sans-serif;color:#12352A;padding:40px;max-width:700px;margin:auto}
+    h1{font-size:1.6rem;color:#14735A} .head{display:flex;justify-content:space-between;margin-bottom:30px}
+    .staff{height:9px;background:repeating-linear-gradient(to bottom,#F26B1D 0 1px,transparent 1px 3px);margin:16px 0 30px}
     table{width:100%;border-collapse:collapse;margin:20px 0}
-    th{text-align:left;font-size:.8rem;text-transform:uppercase;color:#6B6478;border-bottom:2px solid #5B3E8F;padding:8px 4px}
-    td{padding:10px 4px;border-bottom:1px solid #E6E2DB} .num{text-align:right}
-    .total{font-size:1.2rem;font-weight:800;color:#5B3E8F}
-    .footer{margin-top:50px;font-size:.8rem;color:#6B6478}
+    th{text-align:left;font-size:.8rem;text-transform:uppercase;color:#5E7268;border-bottom:2px solid #14735A;padding:8px 4px}
+    td{padding:10px 4px;border-bottom:1px solid #EAE2D4} .num{text-align:right}
+    .total{font-size:1.2rem;font-weight:800;color:#14735A}
+    .footer{margin-top:50px;font-size:.8rem;color:#5E7268}
   </style></head><body>
   <div class="head"><div>
     <h1>${inv.kind === 'devis' ? 'DEVIS' : 'FACTURE'} ${esc(inv.number)}</h1>
@@ -626,6 +626,50 @@ async function sheetPiece(id) {
   if (id) $('#f-del').onclick = async () => { await DB.del('library', id); closeSheet(); renderLibrary(); };
 }
 
+// ====== Sauvegarde cloud ======
+const Cloud = {
+  get pass() { return localStorage.getItem('cloud_pass') || ''; },
+  set pass(v) { v ? localStorage.setItem('cloud_pass', v) : localStorage.removeItem('cloud_pass'); },
+  get lastBackup() { return +(localStorage.getItem('cloud_last') || 0); },
+  async backup(silent) {
+    if (!WORKER_URL || !this.pass) { if (!silent) toast('Configure d\u2019abord la phrase secrète'); return false; }
+    try {
+      const data = JSON.stringify(await DB.exportAll());
+      const r = await fetch(WORKER_URL + '/backup', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Backup-Key': this.pass },
+        body: data
+      });
+      if (!r.ok) throw new Error(await r.text());
+      localStorage.setItem('cloud_last', Date.now());
+      if (!silent) toast('Sauvegardé dans le cloud ✓');
+      return true;
+    } catch (e) {
+      console.warn('cloud backup', e);
+      if (!silent) toast('Échec : ' + (e.message || 'hors ligne ?'));
+      return false;
+    }
+  },
+  async restore() {
+    if (!WORKER_URL || !this.pass) { toast('Renseigne d\u2019abord la phrase secrète'); return; }
+    if (!confirm('Restaurer la sauvegarde cloud ? Les données du téléphone seront fusionnées avec celles du cloud.')) return;
+    try {
+      const r = await fetch(WORKER_URL + '/backup', { headers: { 'X-Backup-Key': this.pass } });
+      if (r.status === 404) { toast('Aucune sauvegarde pour cette phrase secrète'); return; }
+      if (!r.ok) throw new Error(await r.text());
+      await DB.importAll(await r.json());
+      toast('Sauvegarde cloud restaurée ✓');
+      TABS[currentTab].render();
+    } catch (e) { toast('Échec de la restauration'); console.warn(e); }
+  },
+  auto() {
+    // sauvegarde silencieuse une fois par jour, quelques secondes après l'ouverture
+    if (WORKER_URL && this.pass && Date.now() - this.lastBackup > 24 * 3600 * 1000) {
+      setTimeout(() => this.backup(true), 4000);
+    }
+  }
+};
+
 // ====== RÉGLAGES ======
 async function renderSettings() {
   const { courseTypes, forfaits, business } = await getConfig();
@@ -665,9 +709,21 @@ async function renderSettings() {
       <button class="btn" id="c-save">Enregistrer types & forfaits</button>
     </div>
 
-    <h2 class="section">Sauvegarde</h2>
+    <h2 class="section">Sauvegarde cloud ☁️</h2>
     <div class="card">
-      <div class="sub">Tes données sont stockées sur ce téléphone. Pense à exporter une sauvegarde régulièrement.</div>
+      ${WORKER_URL ? `
+      <div class="sub">Choisis une phrase secrète (6 caractères min.) : elle protège ta sauvegarde et permet de la retrouver sur un autre téléphone. Une sauvegarde automatique est faite chaque jour à l\u2019ouverture de l\u2019app.</div>
+      <label class="field" style="margin-top:10px"><span>Phrase secrète</span>
+        <input id="cl-pass" type="password" placeholder="Ex. : mimosa-vocalise-1987" value="${esc(Cloud.pass)}"></label>
+      ${Cloud.lastBackup ? `<div class="sub">Dernière sauvegarde cloud : ${new Date(Cloud.lastBackup).toLocaleString('fr-FR')}</div>` : ''}
+      <button class="btn" id="cl-save">Sauvegarder dans le cloud maintenant</button>
+      <button class="btn secondary" id="cl-restore">Restaurer depuis le cloud</button>
+      ` : `<div class="sub">La sauvegarde cloud utilise le Worker Cloudflare : configure-le (README) puis renseigne <b>WORKER_URL</b> dans <b>js/config.js</b>.</div>`}
+    </div>
+
+    <h2 class="section">Sauvegarde locale</h2>
+    <div class="card">
+      <div class="sub">Tu peux aussi exporter un fichier de sauvegarde à ranger dans iCloud / Fichiers.</div>
       <button class="btn secondary" id="bk-export">Exporter une sauvegarde (JSON)</button>
       <input type="file" id="bk-file" accept="application/json" hidden>
       <button class="btn secondary" id="bk-import">Restaurer une sauvegarde</button>
@@ -675,6 +731,23 @@ async function renderSettings() {
   `;
   const on = $('#gc-on'); if (on) on.onclick = () => GC.connect();
   const off = $('#gc-off'); if (off) off.onclick = () => { GC.disconnect(); renderSettings(); };
+  const clSave = $('#cl-save');
+  if (clSave) {
+    clSave.onclick = async () => {
+      const p = $('#cl-pass').value.trim();
+      if (p.length < 6) { toast('Phrase secrète : 6 caractères minimum'); return; }
+      Cloud.pass = p;
+      clSave.textContent = 'Sauvegarde en cours…';
+      await Cloud.backup(false);
+      renderSettings();
+    };
+    $('#cl-restore').onclick = async () => {
+      const p = $('#cl-pass').value.trim();
+      if (p.length < 6) { toast('Phrase secrète : 6 caractères minimum'); return; }
+      Cloud.pass = p;
+      await Cloud.restore();
+    };
+  }
   $('#b-save').onclick = async () => {
     await DB.setSetting('business', {
       name: $('#b-name').value, address: $('#b-address').value, siret: $('#b-siret').value,
@@ -712,3 +785,4 @@ async function renderSettings() {
 // ====== Démarrage ======
 GC.handleCallback();
 switchTab('agenda');
+Cloud.auto();

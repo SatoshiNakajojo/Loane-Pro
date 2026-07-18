@@ -1,15 +1,17 @@
-/* ===== Studio Vocal — thème "Encre & Laiton" ===== */
+/* ===== Studio Vocal — thème "Showgirl" (orange Portofino & vert luxe) ===== */
 :root{
-  --bg:#F7F5F2;
+  --bg:#FBF6EE;            /* champagne */
   --surface:#FFFFFF;
-  --ink:#241E33;
-  --ink-soft:#6B6478;
-  --primary:#5B3E8F;
-  --primary-soft:#EEE9F7;
-  --accent:#C99A22;
-  --success:#2E7D5B;
-  --danger:#C04545;
-  --line:#E6E2DB;
+  --ink:#12352A;           /* vert encre profond */
+  --ink-soft:#5E7268;
+  --primary:#14735A;       /* vert émeraude "luxe" */
+  --primary-soft:#E4F1EB;
+  --accent:#F26B1D;        /* orange Portofino */
+  --accent-soft:#FDE9DC;
+  --gold:#D9A441;
+  --success:#14735A;
+  --danger:#C43B2E;
+  --line:#EAE2D4;
   --radius:14px;
   --safe-b:env(safe-area-inset-bottom,0px);
   --safe-t:env(safe-area-inset-top,0px);
@@ -23,24 +25,32 @@ body{
   overscroll-behavior:none;
 }
 
-/* --- barre du haut --- */
+/* --- barre du haut : rideau émeraude pailleté --- */
 .topbar{
   position:sticky;top:0;z-index:20;
-  padding:calc(10px + var(--safe-t)) 18px 8px;
-  background:linear-gradient(#241E33,#2E2544);
-  color:#fff;display:flex;align-items:center;justify-content:space-between;
+  padding:calc(10px + var(--safe-t)) 18px 10px;
+  background:
+    radial-gradient(circle at 12% 30%, rgba(242,107,29,.28) 0 1.5px, transparent 2px),
+    radial-gradient(circle at 32% 70%, rgba(255,214,150,.35) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 55% 25%, rgba(242,107,29,.22) 0 1.2px, transparent 2px),
+    radial-gradient(circle at 76% 60%, rgba(255,232,190,.3) 0 1px, transparent 1.8px),
+    radial-gradient(circle at 90% 30%, rgba(242,107,29,.25) 0 1.4px, transparent 2px),
+    linear-gradient(115deg,#0B3A2C,#14735A 60%,#0B3A2C);
+  background-size:90px 60px,70px 50px,110px 70px,80px 55px,100px 65px,100% 100%;
+  color:#FFF8EE;display:flex;align-items:center;justify-content:space-between;
 }
 .topbar h1{font-size:1.35rem;font-weight:800;letter-spacing:-.02em}
-/* signature : la portée musicale sous le titre */
+/* signature : la portée musicale, en orange */
 .topbar::after{
-  content:"";position:absolute;left:18px;right:18px;bottom:2px;height:9px;
-  background:repeating-linear-gradient(to bottom,rgba(201,154,34,.55) 0 1px,transparent 1px 3px);
+  content:"";position:absolute;left:18px;right:18px;bottom:3px;height:9px;
+  background:repeating-linear-gradient(to bottom,rgba(242,107,29,.75) 0 1px,transparent 1px 3px);
   pointer-events:none;
 }
 .btn-icon{
   width:38px;height:38px;border-radius:50%;border:none;
-  background:var(--accent);color:#241E33;font-size:1.5rem;font-weight:700;
+  background:var(--accent);color:#FFF8EE;font-size:1.5rem;font-weight:700;
   display:flex;align-items:center;justify-content:center;
+  box-shadow:0 2px 8px rgba(242,107,29,.4);
 }
 
 /* --- contenu --- */
@@ -48,7 +58,7 @@ main{padding:16px 16px calc(84px + var(--safe-b));max-width:640px;margin:0 auto}
 .card{
   background:var(--surface);border-radius:var(--radius);
   padding:14px 16px;margin-bottom:12px;
-  box-shadow:0 1px 3px rgba(36,30,51,.07);
+  box-shadow:0 1px 3px rgba(18,53,42,.08);
   border:1px solid var(--line);
 }
 .card.tappable:active{background:var(--primary-soft)}
@@ -56,9 +66,7 @@ h2.section{
   font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;
   color:var(--ink-soft);margin:18px 4px 8px;font-weight:700;
 }
-.empty{
-  text-align:center;color:var(--ink-soft);padding:34px 20px;
-}
+.empty{text-align:center;color:var(--ink-soft);padding:34px 20px}
 .empty .big{font-size:2.4rem;margin-bottom:8px}
 
 /* --- listes --- */
@@ -72,32 +80,30 @@ h2.section{
 /* avatar élève */
 .avatar{
   width:48px;height:48px;border-radius:50%;flex-shrink:0;
-  background:var(--primary-soft);color:var(--primary);
+  background:var(--accent-soft);color:var(--accent);
   display:flex;align-items:center;justify-content:center;
   font-weight:800;font-size:1.1rem;object-fit:cover;overflow:hidden;
+  border:2px solid #F8D9C2;
 }
 img.avatar{object-fit:cover}
 .avatar.big{width:88px;height:88px;font-size:2rem}
 
 /* badges */
-.badge{
-  display:inline-block;padding:2px 10px;border-radius:999px;
-  font-size:.75rem;font-weight:700;
-}
-.badge.ok{background:#E4F2EC;color:var(--success)}
-.badge.due{background:#F9E7E7;color:var(--danger)}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:.75rem;font-weight:700}
+.badge.ok{background:var(--primary-soft);color:var(--primary)}
+.badge.due{background:#FBE3E0;color:var(--danger)}
 .badge.info{background:var(--primary-soft);color:var(--primary)}
-.badge.gold{background:#F7EFD8;color:#8A6A12}
+.badge.gold{background:var(--accent-soft);color:#B4490A}
 
 /* --- boutons --- */
 .btn{
   display:block;width:100%;padding:13px;border-radius:12px;border:none;
   font-size:1rem;font-weight:700;text-align:center;
-  background:var(--primary);color:#fff;margin-top:10px;
+  background:var(--primary);color:#FFF8EE;margin-top:10px;
 }
 .btn.secondary{background:var(--primary-soft);color:var(--primary)}
-.btn.danger{background:#F9E7E7;color:var(--danger)}
-.btn.gold{background:var(--accent);color:#241E33}
+.btn.danger{background:#FBE3E0;color:var(--danger)}
+.btn.gold{background:var(--accent);color:#FFF8EE;box-shadow:0 2px 8px rgba(242,107,29,.35)}
 .btn:active{opacity:.85}
 .btn-inline{
   border:none;background:var(--primary-soft);color:var(--primary);
@@ -112,21 +118,20 @@ input,select,textarea{
   font-size:1rem;background:#fff;color:var(--ink);font-family:inherit;
   appearance:none;-webkit-appearance:none;
 }
-select{background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236B6478' stroke-width='2' fill='none'/%3E%3C/svg%3E") no-repeat right 12px center}
+select{background:#fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%235E7268' stroke-width='2' fill='none'/%3E%3C/svg%3E") no-repeat right 12px center}
 textarea{min-height:90px;resize:vertical}
-input:focus,select:focus,textarea{outline-color:var(--primary)}
+input:focus,select:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:1px}
 .field-row{display:flex;gap:10px}
 .field-row label.field{flex:1}
 
-/* --- feuille modale (bottom sheet) --- */
-#sheet-backdrop{
-  position:fixed;inset:0;background:rgba(20,15,35,.45);z-index:40;
-}
+/* --- feuille modale --- */
+#sheet-backdrop{position:fixed;inset:0;background:rgba(9,42,32,.5);z-index:40}
 .sheet{
   position:fixed;left:0;right:0;bottom:0;z-index:50;
   background:var(--bg);border-radius:20px 20px 0 0;
   padding:10px 18px calc(20px + var(--safe-b));
   max-height:88vh;overflow-y:auto;
+  border-top:3px solid var(--accent);
   animation:up .22s ease;
 }
 @keyframes up{from{transform:translateY(40px);opacity:0}to{transform:none;opacity:1}}
@@ -137,7 +142,7 @@ input:focus,select:focus,textarea{outline-color:var(--primary)}
 /* --- barre d'onglets --- */
 .tabbar{
   position:fixed;left:0;right:0;bottom:0;z-index:30;
-  display:flex;background:rgba(255,255,255,.94);
+  display:flex;background:rgba(255,252,246,.94);
   backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
   border-top:1px solid var(--line);
   padding:6px 4px calc(6px + var(--safe-b));
@@ -147,8 +152,8 @@ input:focus,select:focus,textarea{outline-color:var(--primary)}
   font-size:.66rem;font-weight:700;display:flex;flex-direction:column;
   align-items:center;gap:2px;padding:4px 0;
 }
-.tab .tab-ico{font-size:1.35rem;filter:grayscale(1);opacity:.6}
-.tab.active{color:var(--primary)}
+.tab .tab-ico{font-size:1.35rem;filter:grayscale(1);opacity:.55}
+.tab.active{color:var(--accent)}
 .tab.active .tab-ico{filter:none;opacity:1}
 
 /* --- agenda --- */
@@ -168,9 +173,9 @@ input:focus,select:focus,textarea{outline-color:var(--primary)}
 /* --- toast --- */
 #toast{
   position:fixed;left:50%;bottom:calc(96px + var(--safe-b));transform:translateX(-50%);
-  background:var(--ink);color:#fff;padding:10px 18px;border-radius:999px;
+  background:#0B3A2C;color:#FFF8EE;padding:10px 18px;border-radius:999px;
   font-size:.9rem;font-weight:600;z-index:60;white-space:nowrap;
-  box-shadow:0 4px 14px rgba(0,0,0,.25);
+  box-shadow:0 4px 14px rgba(0,0,0,.25);border:1px solid rgba(242,107,29,.5);
 }
 
 /* --- divers --- */
@@ -178,7 +183,7 @@ input:focus,select:focus,textarea{outline-color:var(--primary)}
 .stat{background:var(--primary-soft);border-radius:12px;padding:10px;text-align:center}
 .stat b{display:block;font-size:1.3rem;color:var(--primary)}
 .stat span{font-size:.75rem;color:var(--ink-soft);font-weight:600}
-.tag{display:inline-block;background:var(--primary-soft);color:var(--primary);
+.tag{display:inline-block;background:var(--accent-soft);color:#B4490A;
   border-radius:6px;padding:1px 8px;font-size:.75rem;font-weight:700;margin:2px 4px 2px 0}
 hr.staff{
   border:none;height:9px;margin:14px 0;
