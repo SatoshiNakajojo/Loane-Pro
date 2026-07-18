@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.0.0';
+const APP_VERSION = '3.1.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -281,11 +281,11 @@ async function paymentStatus(student) {
   const lessons = (await lessonsOf(student.id)).filter(l => (l.kind || 'cours') === 'cours');
   const payments = (await DB.byStudent('payments', student.id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const now = Date.now();
-  const done = lessons.filter(l => new Date(l.date) <= now);
+  const done = lessons.filter(l => new Date(l.date) <= now && l.paid !== false);
   const last = payments[0];
   if (!last) return { last: null, due: done.length > 0, remaining: -done.length, expiry: null, expired: false };
 
-  const used = done.filter(l => new Date(l.date) > new Date(last.date)).length;
+  const used = done.filter(l => new Date(l.date) > new Date(last.date)).length;   // les cours offerts sont exclus plus haut
   const remaining = (last.lessonsCovered || 1) - used;
 
   // Validité : depuis l'achat (bon cadeau) ou depuis le 1er cours du forfait
@@ -378,7 +378,7 @@ function itemCard(it) {
   return `<div class="card tappable row" data-lesson="${l.id}">
       <div class="lesson-time">${fmtTime(it.date)}</div>
       <div class="grow"><div class="title">${k.icon} ${esc(it.label)}</div>
-      <div class="sub">${esc(l.type || k.label)} · ${l.duration || 60} min ${l.gcalEventId ? '<span class="gcal-dot">● Google</span>' : ''}</div></div>
+      <div class="sub">${esc(l.type || k.label)} · ${l.duration || 60} min ${l.paid === false ? '· <span style="color:var(--gold)">offert</span>' : ''} ${l.gcalEventId ? '<span class="gcal-dot">● Google</span>' : ''}</div></div>
       <div class="chev">›</div></div>`;
 }
 
@@ -571,15 +571,24 @@ async function sheetImportGcal(ev) {
       <label class="field"><span>Type de cours</span>
         <select id="f-type">${courseTypes.map(x => `<option>${esc(x)}</option>`).join('')}</select></label>
     </div>
-    <div id="fee-box" hidden><label class="field"><span>Cachet / rémunération</span><input type="number" id="f-fee" value="0"></label></div>
+    <label class="switch">
+      <input type="checkbox" id="f-paid" checked>
+      <span class="track"></span>
+      <span class="lbl">Séance payante<small id="paid-hint"></small></span>
+    </label>
+    <div id="fee-box" hidden><label class="field"><span>Cachet perçu</span><input type="number" id="f-fee" value="0"></label></div>
     <button class="btn" id="f-import">Rattacher</button>
   `);
   const refresh = () => {
     const k = $('#f-kind').value;
+    const payant = $('#f-paid').checked;
     $('#student-box').hidden = k !== 'cours';
-    $('#fee-box').hidden = !(k === 'concert' || k === 'autre');
+    $('#fee-box').hidden = !(payant && k !== 'cours');
+    $('#paid-hint').textContent = payant ? 'Comptée comme rémunérée' : 'Non rémunérée (répétition, essai…)';
   };
-  $('#f-kind').onchange = refresh; refresh();
+  $('#f-kind').onchange = refresh;
+  $('#f-paid').onchange = refresh;
+  refresh();
 
   $('#f-import').onclick = async () => {
     const kind = $('#f-kind').value;
@@ -590,7 +599,8 @@ async function sheetImportGcal(ev) {
       title: kind === 'cours' ? '' : (ev.summary || KINDS[kind].label),
       date: start.toISOString(), duration: dur,
       type: kind === 'cours' ? $('#f-type').value : KINDS[kind].label,
-      fee: $('#f-fee') ? +$('#f-fee').value || 0 : 0,
+      paid: $('#f-paid').checked,
+      fee: ($('#f-paid').checked && kind !== 'cours') ? (+$('#f-fee').value || 0) : 0,
       note: ev.description || '', gcalEventId: ev.id
     });
     gcalCache = gcalCache.filter(x => x.id !== ev.id);
@@ -621,21 +631,31 @@ async function sheetLesson(id, presetStudent, presetKind) {
       <label class="field"><span>Date</span><input type="date" id="f-date" value="${d.toISOString().slice(0, 10)}"></label>
       <label class="field"><span>Heure</span><input type="time" id="f-time" value="${d.toTimeString().slice(0, 5)}"></label>
     </div>
-    <div class="field-row">
-      <label class="field"><span>Durée (min)</span><input type="number" id="f-dur" value="${l ? l.duration : 60}"></label>
-      <label class="field" id="fee-box"><span>Cachet</span><input type="number" id="f-fee" value="${l ? (l.fee || 0) : 0}"></label>
-    </div>
+    <label class="field"><span>Durée (min)</span><input type="number" id="f-dur" value="${l ? l.duration : 60}"></label>
+    <label class="switch">
+      <input type="checkbox" id="f-paid" ${!l || l.paid !== false ? 'checked' : ''}>
+      <span class="track"></span>
+      <span class="lbl">Séance payante<small id="paid-hint"></small></span>
+    </label>
+    <label class="field" id="fee-box"><span>Cachet perçu</span><input type="number" id="f-fee" value="${l ? (l.fee || 0) : 0}"></label>
     <label class="field"><span>Note</span><input id="f-note" value="${esc(l ? l.note : '')}"></label>
     <button class="btn" id="f-save">${l ? 'Enregistrer' : 'Ajouter'}</button>
     ${l ? '<button class="btn danger" id="f-del">Supprimer</button>' : ''}
   `);
   const refresh = () => {
     const k = $('#f-kind').value;
+    const payant = $('#f-paid').checked;
     $('#student-box').hidden = k !== 'cours';
     $('#title-box').hidden = k === 'cours';
-    $('#fee-box').style.display = (k === 'concert' || k === 'autre') ? '' : 'none';
+    // le cachet ne concerne que les séances payantes hors cours (concert, prestation…)
+    $('#fee-box').style.display = (payant && k !== 'cours') ? '' : 'none';
+    $('#paid-hint').textContent = payant
+      ? (k === 'cours' ? 'Décompte un cours du forfait de l\u2019élève' : 'Comptée comme rémunérée')
+      : (k === 'cours' ? 'Cours offert : ne décompte aucun cours du forfait' : 'Non rémunérée (répétition, essai…)');
   };
-  $('#f-kind').onchange = refresh; refresh();
+  $('#f-kind').onchange = refresh;
+  $('#f-paid').onchange = refresh;
+  refresh();
 
   $('#f-save').onclick = async () => {
     const k = $('#f-kind').value;
@@ -647,7 +667,8 @@ async function sheetLesson(id, presetStudent, presetKind) {
     item.date = new Date($('#f-date').value + 'T' + $('#f-time').value).toISOString();
     item.type = k === 'cours' ? $('#f-type').value : KINDS[k].label;
     item.duration = +$('#f-dur').value || 60;
-    item.fee = (k === 'concert' || k === 'autre') ? (+$('#f-fee').value || 0) : 0;
+    item.paid = $('#f-paid').checked;
+    item.fee = (item.paid && k !== 'cours') ? (+$('#f-fee').value || 0) : 0;
     item.note = $('#f-note').value;
     await GC.pushLesson(item, k === 'cours' ? await DB.get('students', item.studentId) : null);
     await DB.put('lessons', item);
@@ -689,6 +710,7 @@ async function renderHours() {
   const byKind = {};
   for (const l of inRange) { const k = l.kind || 'cours'; byKind[k] = (byKind[k] || 0) + (l.duration || 60); }
   const revenue = inRange.reduce((s, l) => s + (l.fee || 0), 0);
+  const offertMin = mins(inRange.filter(l => l.paid === false));
 
   let html = `
     <div class="stat-grid">
@@ -707,7 +729,8 @@ async function renderHours() {
     html += `<div class="card"><div class="sub" style="margin-bottom:6px">Répartition · total ${fmtHours(mins(inRange))}</div>
       ${Object.entries(byKind).map(([k, m]) => `<div class="row" style="padding:3px 0">
         <div class="grow">${KINDS[k].icon} ${KINDS[k].label}</div><div class="title">${fmtHours(m)}</div></div>`).join('')}
-      ${revenue ? `<hr class="staff"><div class="row"><div class="grow title">Cachets encaissés</div><div class="title" style="color:var(--orange)">${fmtMoney(revenue)}</div></div>` : ''}
+      ${offertMin ? `<hr class="staff"><div class="row"><div class="grow">Dont séances offertes</div><div class="title" style="color:var(--gold)">${fmtHours(offertMin)}</div></div>` : ''}
+      ${revenue ? `<div class="row" style="padding:3px 0"><div class="grow title">Cachets encaissés</div><div class="title" style="color:var(--orange)">${fmtMoney(revenue)}</div></div>` : ''}
     </div>`;
   }
 
@@ -725,7 +748,7 @@ async function renderHours() {
       html += `<div class="card tappable row" data-lesson="${l.id}">
         <div class="lesson-time">${fmtTime(l.date)}</div>
         <div class="grow"><div class="title">${k.icon} ${esc(s ? s.name : (l.title || k.label))}</div>
-        <div class="sub">${fmtHours(l.duration || 60)}${l.fee ? ' · ' + fmtMoney(l.fee) : ''}</div></div>
+        <div class="sub">${fmtHours(l.duration || 60)}${l.fee ? ' · ' + fmtMoney(l.fee) : ''}${l.paid === false ? ' · offert' : ''}</div></div>
         <div class="chev">›</div></div>`;
     }
   }
