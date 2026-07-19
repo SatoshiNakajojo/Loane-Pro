@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.3.0';
+const APP_VERSION = '3.4.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -36,11 +36,16 @@ $('#sheet-backdrop').addEventListener('click', closeSheet);
 
 // ====== Types de séances ======
 const KINDS = {
-  cours: { label: 'Cours', icon: '🎤', student: true, paid: true },
-  repetition: { label: 'Répétition', icon: '🎹', student: false, paid: false },
-  concert: { label: 'Concert', icon: '🎭', student: false, paid: true },
-  autre: { label: 'Autre', icon: '📌', student: false, paid: false }
+  cours: { label: 'Cours', icon: '🎤', student: true, paid: true, travail: true },
+  repetition: { label: 'Répétition', icon: '🎹', student: false, paid: false, travail: true },
+  concert: { label: 'Concert', icon: '🎭', student: false, paid: true, travail: true },
+  autre: { label: 'Autre (travail)', icon: '📌', student: false, paid: false, travail: true },
+  perso: { label: 'Perso (hors travail)', icon: '🏡', student: false, paid: false, travail: false }
 };
+const estTravail = l => (KINDS[l.kind || 'cours'] || {}).travail !== false;
+
+// Lieux possibles pour un cours
+const LIEUX = { ecole: "À l\u2019école", domicile: 'À domicile' };
 
 // ====== Réglages par défaut ======
 const DEFAULT_FORFAITS = [
@@ -280,15 +285,64 @@ function cloudBadge(etat) {
   if (etat === 'ok') setTimeout(() => { el.hidden = true; }, 2500);
 }
 
-// On enrobe les écritures de la base pour déclencher la sauvegarde
-['put', 'del', 'setSetting', 'importAll'].forEach(m => {
-  const orig = DB[m].bind(DB);
-  DB[m] = async function (...args) {
-    const r = await orig(...args);
+// ====== Annulation des 5 dernières actions ======
+const Undo = {
+  pile: [],
+  libelles: { students: 'élève', lessons: 'séance', payments: 'paiement', notes: 'note', invoices: 'document', library: 'morceau' },
+  ajouter(libelle, inverse) {
+    this.pile.push({ libelle, inverse });
+    if (this.pile.length > 5) this.pile.shift();
+    this.maj();
+  },
+  maj() {
+    const b = document.getElementById('topbar-undo');
+    if (b) { b.hidden = this.pile.length === 0; b.title = this.pile.length ? 'Annuler : ' + this.pile[this.pile.length - 1].libelle : ''; }
+  },
+  async annuler() {
+    const action = this.pile.pop();
+    if (!action) return;
+    try {
+      await action.inverse();
+      toast('Annulé : ' + action.libelle);
+    } catch (e) { toast('Annulation impossible'); }
+    this.maj();
+    Cloud.schedule();
+    refreshView();
+  }
+};
+
+// On enrobe les écritures de la base : sauvegarde cloud + mémorisation pour l'annulation
+(() => {
+  const brut = { put: DB.put.bind(DB), del: DB.del.bind(DB), get: DB.get.bind(DB), setSetting: DB.setSetting.bind(DB), importAll: DB.importAll.bind(DB) };
+  const sansHistorique = new Set(['settings']);
+
+  DB.put = async function (store, obj) {
+    let avant = null, existait = false;
+    if (!sansHistorique.has(store) && obj && obj.id) {
+      avant = await brut.get(store, obj.id);
+      existait = !!avant;
+    }
+    const r = await brut.put(store, obj);
+    if (!sansHistorique.has(store)) {
+      const quoi = Undo.libelles[store] || 'élément';
+      if (existait) Undo.ajouter('modification ' + quoi, () => brut.put(store, avant));
+      else Undo.ajouter('ajout ' + quoi, () => brut.del(store, r.id));
+    }
     Cloud.schedule();
     return r;
   };
-});
+
+  DB.del = async function (store, id) {
+    const avant = sansHistorique.has(store) ? null : await brut.get(store, id);
+    const r = await brut.del(store, id);
+    if (avant) Undo.ajouter('suppression ' + (Undo.libelles[store] || 'élément'), () => brut.put(store, avant));
+    Cloud.schedule();
+    return r;
+  };
+
+  DB.setSetting = async function (...a) { const r = await brut.setSetting(...a); Cloud.schedule(); return r; };
+  DB.importAll = async function (...a) { const r = await brut.importAll(...a); Cloud.schedule(); return r; };
+})();
 
 // ====== Utilitaires métier ======
 async function lessonsOf(studentId) {
@@ -360,6 +414,7 @@ function switchTab(tab) {
   $('#page-title').textContent = t.title;
   const act = $('#topbar-action');
   act.hidden = !t.action; act.onclick = t.action;
+  Undo.maj();
   t.render();
 }
 
@@ -405,11 +460,12 @@ function itemCard(it) {
       <div class="sub"><span class="gcal-dot">●</span> Google · toucher pour rattacher</div></div>
       <div class="chev">›</div></div>`;
   const l = it.lesson, k = KINDS[it.kind];
-  return `<div class="card tappable row" data-lesson="${l.id}">
+  return `<div class="swipe"><button class="swipe-del" data-del-lesson="${l.id}">Supprimer</button>
+    <div class="card tappable row swipe-item" data-lesson="${l.id}">
       <div class="lesson-time">${fmtTime(it.date)}</div>
       <div class="grow"><div class="title">${k.icon} ${esc(it.label)}</div>
-      <div class="sub">${esc(l.type || k.label)} · ${l.duration || 60} min ${l.paid === false ? '· <span style="color:var(--gold)">offert</span>' : ''} ${l.gcalEventId ? '<span class="gcal-dot">● Google</span>' : ''}</div></div>
-      <div class="chev">›</div></div>`;
+      <div class="sub">${esc(l.type || k.label)} · ${l.duration || 60} min${l.lieu === 'domicile' ? ' · à domicile' : ''} ${l.paid === false ? '· <span style="color:var(--gold)">offert</span>' : ''} ${l.gcalEventId ? '<span class="gcal-dot">● Google</span>' : ''}</div></div>
+      <div class="chev">›</div></div></div>`;
 }
 
 async function renderAgenda() {
@@ -472,6 +528,7 @@ async function renderAgenda() {
     try { gcalCache = await GC.pullEvents(); toast('Agenda synchronisé ✓'); } catch (e) { toast('Échec de la synchro'); }
     renderAgenda();
   };
+  activerGlissement(view);
   const conn = $('#btn-gc-connect'); if (conn) conn.onclick = () => GC.connect();
   const pastBtn = $('#past-import');
   if (pastBtn) pastBtn.onclick = () => sheetPastList(gPast);   // uniquement ceux qui ne sont pas encore rattachés
@@ -552,8 +609,51 @@ function viewMonth(items) {
   return html;
 }
 
+// Glissement latéral pour révéler le bouton Supprimer
+function activerGlissement(racine) {
+  racine.querySelectorAll('.swipe-item').forEach(el => {
+    if (el.dataset.swipeOn) return;
+    el.dataset.swipeOn = '1';
+    let x0 = 0, y0 = 0, dx = 0, actif = false;
+    el.addEventListener('touchstart', e => {
+      const t = e.touches[0]; x0 = t.clientX; y0 = t.clientY; dx = 0; actif = false;
+      // on referme les autres
+      racine.querySelectorAll('.swipe-item.ouvert').forEach(o => { if (o !== el) { o.classList.remove('ouvert'); o.style.transform = ''; } });
+    }, { passive: true });
+    el.addEventListener('touchmove', e => {
+      const t = e.touches[0];
+      const ex = t.clientX - x0, ey = t.clientY - y0;
+      if (!actif && Math.abs(ex) > 12 && Math.abs(ex) > Math.abs(ey) * 1.6) actif = true;
+      if (!actif) return;
+      dx = Math.max(-96, Math.min(0, ex + (el.classList.contains('ouvert') ? -96 : 0)));
+      el.style.transform = `translateX(${dx}px)`;
+    }, { passive: true });
+    el.addEventListener('touchend', () => {
+      if (!actif) return;
+      const ouvert = dx < -48;
+      el.classList.toggle('ouvert', ouvert);
+      el.style.transform = ouvert ? 'translateX(-96px)' : '';
+      if (ouvert) el.dataset.ignoreClic = '1';
+      setTimeout(() => delete el.dataset.ignoreClic, 60);
+    });
+  });
+}
+
 // Délégation : fiable même après re-rendu
-view.addEventListener('click', e => {
+view.addEventListener('click', async e => {
+  const supp = e.target.closest('[data-del-lesson]');
+  if (supp) {
+    const l = await DB.get('lessons', supp.dataset.delLesson);
+    await DB.del('lessons', supp.dataset.delLesson);
+    toast('Séance supprimée · touche ↺ pour annuler');
+    refreshView();
+    return;
+  }
+  const item = e.target.closest('.swipe-item');
+  if (item && (item.dataset.ignoreClic || item.classList.contains('ouvert'))) {
+    item.classList.remove('ouvert'); item.style.transform = '';
+    return;   // on referme au lieu d'ouvrir la fiche
+  }
   const gEl = e.target.closest('[data-gcal]');
   if (gEl) {
     const ev = gcalCache.find(x => x.id === gEl.dataset.gcal);
@@ -656,6 +756,8 @@ async function sheetLesson(id, presetStudent, presetKind) {
         <select id="f-student">${students.map(s => `<option value="${s.id}" ${(l && l.studentId === s.id) || presetStudent === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
       <label class="field"><span>Type de cours</span>
         <select id="f-type">${courseTypes.map(t => `<option ${l && l.type === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+      <label class="field" id="lieu-box"><span>Lieu du cours</span>
+        <select id="f-lieu">${Object.entries(LIEUX).map(([v, t]) => `<option value="${v}" ${l && l.lieu === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
     </div>
     <div id="title-box" hidden><label class="field"><span>Intitulé</span><input id="f-title" value="${esc(l ? l.title : '')}" placeholder="Répétition, concert…"></label></div>
     <div class="field-row">
@@ -673,11 +775,23 @@ async function sheetLesson(id, presetStudent, presetKind) {
     <button class="btn" id="f-save">${l ? 'Enregistrer' : 'Ajouter'}</button>
     ${l ? '<button class="btn danger" id="f-del">Supprimer</button>' : ''}
   `);
+  // le lieu suit la préférence de l'élève, sauf en collectif (toujours à l'école)
+  const majLieu = async () => {
+    const collectif = /collectif/i.test($('#f-type').value || '');
+    $('#lieu-box').style.display = ($('#f-kind').value === 'cours' && !collectif) ? '' : 'none';
+    if (collectif) { $('#f-lieu').value = 'ecole'; return; }
+    if (!l) {
+      const el = await DB.get('students', $('#f-student').value);
+      if (el && el.lieu) $('#f-lieu').value = el.lieu;
+    }
+  };
+
   const refresh = () => {
     const k = $('#f-kind').value;
     const payant = $('#f-paid').checked;
     $('#student-box').hidden = k !== 'cours';
     $('#title-box').hidden = k === 'cours';
+    majLieu();
     // le cachet ne concerne que les séances payantes hors cours (concert, prestation…)
     $('#fee-box').style.display = (payant && k !== 'cours') ? '' : 'none';
     $('#paid-hint').textContent = payant
@@ -686,6 +800,8 @@ async function sheetLesson(id, presetStudent, presetKind) {
   };
   $('#f-kind').onchange = refresh;
   $('#f-paid').onchange = refresh;
+  $('#f-type').onchange = majLieu;
+  $('#f-student').onchange = majLieu;
   refresh();
 
   $('#f-save').onclick = async () => {
@@ -698,6 +814,7 @@ async function sheetLesson(id, presetStudent, presetKind) {
     item.date = new Date($('#f-date').value + 'T' + $('#f-time').value).toISOString();
     item.type = k === 'cours' ? $('#f-type').value : KINDS[k].label;
     item.duration = +$('#f-dur').value || 60;
+    item.lieu = k === 'cours' ? (/collectif/i.test($('#f-type').value) ? 'ecole' : $('#f-lieu').value) : '';
     item.paid = $('#f-paid').checked;
     item.fee = (item.paid && k !== 'cours') ? (+$('#f-fee').value || 0) : 0;
     item.note = $('#f-note').value;
@@ -713,7 +830,8 @@ async function sheetLesson(id, presetStudent, presetKind) {
 // ====== HEURES EFFECTUÉES ======
 let hoursRange = 'month';
 async function renderHours() {
-  const all = (await DB.all('lessons')).filter(l => new Date(l.date) <= Date.now())
+  const all = (await DB.all('lessons'))
+    .filter(l => new Date(l.date) <= Date.now() && estTravail(l))   // le perso ne compte pas
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const students = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
 
@@ -757,7 +875,7 @@ async function renderHours() {
 
   if (Object.keys(byKind).length) {
     html += `<div class="card"><div class="sub" style="margin-bottom:6px">Répartition · total ${fmtHours(mins(inRange))}</div>
-      ${Object.keys(KINDS).map(k => `<div class="row" style="padding:3px 0">
+      ${Object.keys(KINDS).filter(k => KINDS[k].travail !== false).map(k => `<div class="row" style="padding:3px 0">
         <div class="grow"${byKind[k] ? '' : ' style="opacity:.5"'}>${KINDS[k].icon} ${KINDS[k].label}</div>
         <div class="title"${byKind[k] ? '' : ' style="opacity:.5"'}>${fmtHours(byKind[k] || 0)}</div></div>`).join('')}
       ${offertMin ? `<hr class="staff"><div class="row"><div class="grow">Dont séances offertes</div><div class="title" style="color:var(--gold)">${fmtHours(offertMin)}</div></div>` : ''}
@@ -785,15 +903,17 @@ async function renderHours() {
       if (key !== curDay) { curDay = key; html += `<div class="day-head">${fmtDate(l.date)}</div>`; }
       const k = KINDS[l.kind || 'cours'];
       const s = students[l.studentId];
-      html += `<div class="card tappable row" data-lesson="${l.id}">
+      html += `<div class="swipe"><button class="swipe-del" data-del-lesson="${l.id}">Supprimer</button>
+        <div class="card tappable row swipe-item" data-lesson="${l.id}">
         <div class="lesson-time">${fmtTime(l.date)}</div>
         <div class="grow"><div class="title">${k.icon} ${esc(s ? s.name : (l.title || k.label))}</div>
         <div class="sub">${fmtHours(l.duration || 60)}${l.fee ? ' · ' + fmtMoney(l.fee) : ''}${l.paid === false ? ' · offert' : ''}</div></div>
-        <div class="chev">›</div></div>`;
+        <div class="chev">›</div></div></div>`;
     }
   }
   view.innerHTML = html;
   view.querySelectorAll('[data-range]').forEach(b => b.onclick = () => { hoursRange = b.dataset.range; renderHours(); });
+  activerGlissement(view);
   $('#add-act').onclick = () => sheetLesson(null, null, 'repetition');
   const orph = $('#orphelins'); if (orph) orph.onclick = () => sheetPastList(orphelins);
 }
@@ -887,6 +1007,7 @@ async function renderStudentDetail(id) {
     <h2 class="section">Suivi pédagogique</h2>
     <div class="card">
       ${s.level ? `<div style="margin-bottom:8px"><span class="tag g">Niveau</span> ${esc(s.level)}</div>` : ''}
+      <div style="margin-bottom:8px"><span class="tag">Lieu habituel</span> ${LIEUX[s.lieu || 'ecole']}</div>
       ${descriptionOf(s) ? `<p style="white-space:pre-wrap">${esc(descriptionOf(s))}</p>` : ''}
       ${!s.level && !descriptionOf(s) ? '<div class="sub">À renseigner via « Modifier le profil ».</div>' : ''}
     </div>
@@ -955,7 +1076,11 @@ async function sheetStudent(id) {
       <label class="field"><span>Téléphone</span><input id="f-phone" type="tel" value="${esc(s.phone || '')}"></label>
       <label class="field"><span>E-mail</span><input id="f-email" type="email" value="${esc(s.email || '')}"></label>
     </div>
-    <label class="field"><span>Niveau</span><input id="f-level" value="${esc(s.level || '')}"></label>
+    <div class="field-row">
+      <label class="field"><span>Niveau</span><input id="f-level" value="${esc(s.level || '')}"></label>
+      <label class="field"><span>Lieu habituel</span>
+        <select id="f-lieu">${Object.entries(LIEUX).map(([v, t]) => `<option value="${v}" ${(s.lieu || 'ecole') === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+    </div>
     <label class="field"><span>Description</span><textarea id="f-desc" style="min-height:130px" placeholder="Parcours, objectifs, remarques…">${esc(descriptionOf(s))}</textarea></label>
     <button class="btn" id="f-save">${id ? 'Enregistrer' : 'Créer le profil'}</button>
     ${id ? '<button class="btn danger" id="f-del">Supprimer cet élève</button>' : ''}
@@ -971,7 +1096,7 @@ async function sheetStudent(id) {
     const name = $('#f-name').value.trim();
     if (!name) { toast('Le nom est obligatoire'); return; }
     const obj = { ...(s.id ? s : {}), name, photo, phone: $('#f-phone').value, email: $('#f-email').value,
-                  level: $('#f-level').value, description: $('#f-desc').value };
+                  level: $('#f-level').value, lieu: $('#f-lieu').value, description: $('#f-desc').value };
     delete obj.strengths; delete obj.difficulties;      // anciens champs, désormais fusionnés
     const saved = await DB.put('students', obj);
     closeSheet(); toast('Profil enregistré ✓'); renderStudentDetail(saved.id);
@@ -1735,6 +1860,7 @@ function sheetSetCode() {
   CURRENCY = await DB.getSetting('currency', 'XPF');
   GC.handleCallback();
   Lock.init();
+  $('#topbar-undo').onclick = () => Undo.annuler();
   switchTab('agenda');
   Cloud.auto();
 

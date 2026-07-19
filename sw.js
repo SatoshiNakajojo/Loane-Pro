@@ -1,7 +1,7 @@
 // Service worker — Loane Pro
 // Stratégie "réseau d'abord" : l'app se met à jour dès qu'il y a du réseau,
 // et reste utilisable hors ligne grâce au cache.
-const CACHE = 'loane-pro-3.3.0';
+const CACHE = 'loane-pro-3.4.0';
 const ASSETS = [
   './', './index.html', './css/app.css',
   './js/config.js', './js/db.js', './js/app.js',
