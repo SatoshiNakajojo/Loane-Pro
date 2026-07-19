@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.2.0';
+const APP_VERSION = '3.3.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -169,33 +169,10 @@ const GC = {
     if (!r.ok) throw new Error('Google API ' + r.status);
     return r.json();
   },
-  async pushLesson(item, student) {
-    if (!this.connected) return item;
-    const start = new Date(item.date);
-    const end = new Date(start.getTime() + (item.duration || 60) * 60000);
-    const k = KINDS[item.kind || 'cours'];
-    const who = student ? student.name : (item.title || k.label);
-    const body = {
-      summary: k.icon + ' ' + who + (item.kind === 'cours' || !item.kind ? ' — ' + (item.type || 'Cours de chant') : ''),
-      description: item.note || '',
-      start: { dateTime: start.toISOString() }, end: { dateTime: end.toISOString() }
-    };
-    try {
-      if (item.gcalEventId) await this.api('/calendars/primary/events/' + item.gcalEventId, { method: 'PATCH', body: JSON.stringify(body) });
-      else {
-        const ev = await this.api('/calendars/primary/events', { method: 'POST', body: JSON.stringify(body) });
-        item.gcalEventId = ev.id;
-      }
-    } catch (e) { console.warn('sync gcal', e); toast('Synchro Google impossible'); }
-    return item;
-  },
-  async deleteLesson(item) {
-    if (!this.connected || !item.gcalEventId) return;
-    try { await this.api('/calendars/primary/events/' + item.gcalEventId, { method: 'DELETE' }); } catch (e) { }
-  },
   async pullEvents() {
     if (!this.connected) return [];
-    const min = new Date(Date.now() - 120 * 864e5).toISOString();
+    const depuis = localStorage.getItem('gc_since') || '2026-05-25';
+    const min = new Date(depuis + 'T00:00:00').toISOString();
     const max = new Date(Date.now() + 120 * 864e5).toISOString();
     const data = await this.api(`/calendars/primary/events?timeMin=${min}&timeMax=${max}&singleEvents=true&orderBy=startTime&maxResults=800`);
     return (data.items || []).filter(e => e.start && e.start.dateTime);
@@ -437,6 +414,9 @@ function itemCard(it) {
 
 async function renderAgenda() {
   const items = await agendaItems();
+  // événements Google passés qui ne sont rattachés à aucune séance
+  const debutJour = new Date(new Date().toDateString());
+  const gPast = items.filter(i => i.gcal && new Date(i.date) < debutJour).map(i => i.gcal);
   const isToday = agendaView === 'list' ||
     (agendaView === 'week' && mondayOf(agendaAnchor).getTime() === mondayOf(new Date()).getTime()) ||
     (agendaView === 'month' && agendaAnchor.getMonth() === new Date().getMonth() && agendaAnchor.getFullYear() === new Date().getFullYear());
@@ -461,10 +441,8 @@ async function renderAgenda() {
 
   if (GC.connected) {
     html += `<button class="btn secondary" id="btn-sync">🔄 Synchroniser Google Agenda</button>`;
-    const past = gcalCache.filter(e => new Date(e.start.dateTime) < new Date(new Date().toDateString()))
-      .filter(e => !items.some(i => i.lesson && i.lesson.gcalEventId === e.id));
-    if (past.length) html += `<div class="card accent tappable" id="past-import" style="margin-top:12px">
-        <div class="title">📥 ${past.length} événement${past.length > 1 ? 's' : ''} passé${past.length > 1 ? 's' : ''} à rattacher</div>
+    if (gPast.length) html += `<div class="card accent tappable" id="past-import" style="margin-top:12px">
+        <div class="title">📥 ${gPast.length} événement${gPast.length > 1 ? 's' : ''} passé${gPast.length > 1 ? 's' : ''} à rattacher</div>
         <div class="sub">Toucher pour les affecter à un élève ou les compter en heures.</div></div>`;
   } else if (WORKER_URL) {
     html += `<div class="card"><div class="sub">Google Agenda non connecté.</div><button class="btn secondary" id="btn-gc-connect">Connecter Google Agenda</button></div>`;
@@ -496,7 +474,7 @@ async function renderAgenda() {
   };
   const conn = $('#btn-gc-connect'); if (conn) conn.onclick = () => GC.connect();
   const pastBtn = $('#past-import');
-  if (pastBtn) pastBtn.onclick = () => sheetPastList(gcalCache.filter(e => new Date(e.start.dateTime) < new Date(new Date().toDateString())));
+  if (pastBtn) pastBtn.onclick = () => sheetPastList(gPast);   // uniquement ceux qui ne sont pas encore rattachés
 }
 
 // --- Vue liste (à venir) ---
@@ -723,12 +701,11 @@ async function sheetLesson(id, presetStudent, presetKind) {
     item.paid = $('#f-paid').checked;
     item.fee = (item.paid && k !== 'cours') ? (+$('#f-fee').value || 0) : 0;
     item.note = $('#f-note').value;
-    await GC.pushLesson(item, k === 'cours' ? await DB.get('students', item.studentId) : null);
-    await DB.put('lessons', item);
+    await DB.put('lessons', item);   // l'app n'écrit jamais dans Google Agenda
     closeSheet(); toast('Enregistré ✓'); refreshView();
   };
   if (l) $('#f-del').onclick = async () => {
-    await GC.deleteLesson(l); await DB.del('lessons', l.id);
+    await DB.del('lessons', l.id);   // l'événement Google d'origine est conservé intact
     closeSheet(); toast('Supprimé'); refreshView();
   };
 }
@@ -780,12 +757,22 @@ async function renderHours() {
 
   if (Object.keys(byKind).length) {
     html += `<div class="card"><div class="sub" style="margin-bottom:6px">Répartition · total ${fmtHours(mins(inRange))}</div>
-      ${Object.entries(byKind).map(([k, m]) => `<div class="row" style="padding:3px 0">
-        <div class="grow">${KINDS[k].icon} ${KINDS[k].label}</div><div class="title">${fmtHours(m)}</div></div>`).join('')}
+      ${Object.keys(KINDS).map(k => `<div class="row" style="padding:3px 0">
+        <div class="grow"${byKind[k] ? '' : ' style="opacity:.5"'}>${KINDS[k].icon} ${KINDS[k].label}</div>
+        <div class="title"${byKind[k] ? '' : ' style="opacity:.5"'}>${fmtHours(byKind[k] || 0)}</div></div>`).join('')}
       ${offertMin ? `<hr class="staff"><div class="row"><div class="grow">Dont séances offertes</div><div class="title" style="color:var(--gold)">${fmtHours(offertMin)}</div></div>` : ''}
       ${revenue ? `<div class="row" style="padding:3px 0"><div class="grow title">Cachets encaissés</div><div class="title" style="color:var(--orange)">${fmtMoney(revenue)}</div></div>` : ''}
     </div>`;
   }
+
+  // les événements Google non rattachés ne sont comptés nulle part : on le signale
+  const lies = new Set((await DB.all('lessons')).map(l => l.gcalEventId).filter(Boolean));
+  const bornes = hoursRange === 'week' ? startWeek : hoursRange === 'month' ? startMonth : new Date(0);
+  const orphelins = gcalCache.filter(e => !lies.has(e.id)
+    && new Date(e.start.dateTime) <= now && new Date(e.start.dateTime) >= bornes);
+  if (orphelins.length) html += `<div class="card accent tappable" id="orphelins">
+      <div class="title">📥 ${orphelins.length} événement${orphelins.length > 1 ? 's' : ''} Google non rattaché${orphelins.length > 1 ? 's' : ''}</div>
+      <div class="sub">Ces heures ne sont pas comptées. Toucher pour les rattacher (cours, répétition, concert…).</div></div>`;
 
   html += `<button class="btn secondary" id="add-act">＋ Ajouter une répétition / un concert</button>`;
 
@@ -808,6 +795,7 @@ async function renderHours() {
   view.innerHTML = html;
   view.querySelectorAll('[data-range]').forEach(b => b.onclick = () => { hoursRange = b.dataset.range; renderHours(); });
   $('#add-act').onclick = () => sheetLesson(null, null, 'repetition');
+  const orph = $('#orphelins'); if (orph) orph.onclick = () => sheetPastList(orphelins);
 }
 
 // ====== ÉLÈVES ======
@@ -1407,15 +1395,27 @@ async function settingsTarifs() {
 async function settingsGoogle() {
   view.innerHTML = settingsBack('Google Agenda') + `<div class="card">
     ${GC.connected ? `<span class="badge ok">Connecté</span>
-        <div class="sub" style="margin-top:8px">Les séances créées ici partent dans l\u2019agenda Google, et ses événements apparaissent dans l\u2019app.</div>
+        <div class="sub" style="margin-top:8px"><b>Lecture seule :</b> l\u2019app récupère les événements de Google Agenda mais n\u2019y écrit jamais. Rien n\u2019y est ajouté, modifié ni supprimé.</div>
+        <label class="field" style="margin-top:12px"><span>Récupérer les événements depuis le</span>
+          <input type="date" id="gc-since" value="${localStorage.getItem('gc_since') || '2026-05-25'}"></label>
+        <button class="btn secondary" id="gc-resync">Resynchroniser maintenant</button>
         <button class="btn danger" id="gc-off">Déconnecter</button>`
-      : WORKER_URL ? `<div class="sub">Connecte le compte Google pour synchroniser les cours.</div>
+      : WORKER_URL ? `<div class="sub">Connecte le compte Google pour récupérer les événements.</div>
         <button class="btn" id="gc-on">Connecter Google Agenda</button>`
         : `<div class="sub">Renseigne WORKER_URL dans js/config.js.</div>`}
     </div>`;
   bindBack();
   const on = $('#gc-on'); if (on) on.onclick = () => GC.connect();
   const off = $('#gc-off'); if (off) off.onclick = () => { GC.disconnect(); renderSettings(); };
+  const since = $('#gc-since');
+  if (since) since.onchange = e => { localStorage.setItem('gc_since', e.target.value); toast('Date enregistrée ✓'); };
+  const resync = $('#gc-resync');
+  if (resync) resync.onclick = async () => {
+    resync.textContent = 'Synchronisation…';
+    try { gcalCache = await GC.pullEvents(); toast(gcalCache.length + ' événement(s) récupéré(s) ✓'); }
+    catch (e) { toast('Échec de la synchro'); }
+    renderSettings();
+  };
 }
 
 // --- Sécurité ---
