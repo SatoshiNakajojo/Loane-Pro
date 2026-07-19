@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.4.0';
+const APP_VERSION = '3.5.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -43,6 +43,9 @@ const KINDS = {
   perso: { label: 'Perso (hors travail)', icon: '🏡', student: false, paid: false, travail: false }
 };
 const estTravail = l => (KINDS[l.kind || 'cours'] || {}).travail !== false;
+// Les séances créées à l'avance attendent une validation ; les anciennes sont considérées faites
+const estValide = l => (l.status || 'done') === 'done';
+const enAttente = l => !estValide(l) && new Date(l.date) <= Date.now();
 
 // Lieux possibles pour un cours
 const LIEUX = { ecole: "À l\u2019école", domicile: 'À domicile' };
@@ -359,7 +362,7 @@ async function paymentStatus(student) {
 
   // les cours collectifs et les cours offerts ne consomment pas le forfait
   const decomptables = seances.filter(l => l.paid !== false && !estCollectif(l));
-  const faits = decomptables.filter(l => new Date(l.date) <= now);
+  const faits = decomptables.filter(l => new Date(l.date) <= now && estValide(l));   // en attente = pas encore décompté
   const dureeTotale = l => l.duration || 60;
 
   const last = payments[0];
@@ -419,6 +422,20 @@ function switchTab(tab) {
 }
 
 // ====== AGENDA ======
+// Événements Google que l'on ne veut pas voir (ils restent intacts dans Google Agenda)
+let ignores = new Set();
+async function chargerIgnores() {
+  ignores = new Set(await DB.getSetting('gcalIgnores', []));
+}
+async function ignorer(id) {
+  ignores.add(id);
+  await DB.setSetting('gcalIgnores', [...ignores]);
+}
+async function reafficherIgnores() {
+  ignores = new Set();
+  await DB.setSetting('gcalIgnores', []);
+}
+
 let gcalCache = [];
 let agendaView = 'list';          // list | week | month
 let agendaAnchor = new Date();    // date de référence pour les vues semaine/mois
@@ -448,17 +465,18 @@ async function agendaItems() {
     label: (students[l.studentId] ? students[l.studentId].name : (l.title || KINDS[l.kind || 'cours'].label))
   }));
   for (const e of gcalCache) {
-    if (!linked.has(e.id)) items.push({ date: e.start.dateTime, gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
+    if (!linked.has(e.id) && !ignores.has(e.id)) items.push({ date: e.start.dateTime, gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
   }
   return items.sort((a, b) => new Date(a.date) - new Date(b.date));
 }
 
 function itemCard(it) {
-  if (it.gcal) return `<div class="card tappable row" data-gcal="${it.gcal.id}">
+  if (it.gcal) return `<div class="swipe"><button class="swipe-del ignorer" data-ignore="${it.gcal.id}">Ignorer</button>
+      <div class="card tappable row swipe-item" data-gcal="${it.gcal.id}">
       <div class="lesson-time">${fmtTime(it.date)}</div>
       <div class="grow"><div class="title">${esc(it.label)}</div>
       <div class="sub"><span class="gcal-dot">●</span> Google · toucher pour rattacher</div></div>
-      <div class="chev">›</div></div>`;
+      <div class="chev">›</div></div></div>`;
   const l = it.lesson, k = KINDS[it.kind];
   return `<div class="swipe"><button class="swipe-del" data-del-lesson="${l.id}">Supprimer</button>
     <div class="card tappable row swipe-item" data-lesson="${l.id}">
@@ -495,6 +513,11 @@ async function renderAgenda() {
   }
   if (!isToday) html += `<button class="btn gold" id="btn-today" style="margin-top:0">📍 Aujourd\u2019hui</button>`;
 
+  const aValider = (await DB.all('lessons')).filter(enAttente);
+  if (aValider.length) html += `<div class="card accent tappable" id="a-valider">
+      <div class="title">✓ ${aValider.length} cours en attente de validation</div>
+      <div class="sub">Passés mais pas encore confirmés : ils ne sont comptés ni en heures ni sur les forfaits.</div></div>`;
+
   if (GC.connected) {
     html += `<button class="btn secondary" id="btn-sync">🔄 Synchroniser Google Agenda</button>`;
     if (gPast.length) html += `<div class="card accent tappable" id="past-import" style="margin-top:12px">
@@ -530,6 +553,8 @@ async function renderAgenda() {
   };
   activerGlissement(view);
   const conn = $('#btn-gc-connect'); if (conn) conn.onclick = () => GC.connect();
+  const av = $('#a-valider');
+  if (av) av.onclick = () => sheetAValider(aValider);
   const pastBtn = $('#past-import');
   if (pastBtn) pastBtn.onclick = () => sheetPastList(gPast);   // uniquement ceux qui ne sont pas encore rattachés
 }
@@ -623,7 +648,10 @@ function activerGlissement(racine) {
     el.addEventListener('touchmove', e => {
       const t = e.touches[0];
       const ex = t.clientX - x0, ey = t.clientY - y0;
-      if (!actif && Math.abs(ex) > 12 && Math.abs(ex) > Math.abs(ey) * 1.6) actif = true;
+      if (!actif && Math.abs(ex) > 12 && Math.abs(ex) > Math.abs(ey) * 1.6) {
+        actif = true;
+        el.parentElement.classList.add('glisse');   // on ne révèle le bouton qu'à ce moment
+      }
       if (!actif) return;
       dx = Math.max(-96, Math.min(0, ex + (el.classList.contains('ouvert') ? -96 : 0)));
       el.style.transform = `translateX(${dx}px)`;
@@ -633,6 +661,7 @@ function activerGlissement(racine) {
       const ouvert = dx < -48;
       el.classList.toggle('ouvert', ouvert);
       el.style.transform = ouvert ? 'translateX(-96px)' : '';
+      if (!ouvert) setTimeout(() => el.parentElement.classList.remove('glisse'), 240);
       if (ouvert) el.dataset.ignoreClic = '1';
       setTimeout(() => delete el.dataset.ignoreClic, 60);
     });
@@ -641,6 +670,13 @@ function activerGlissement(racine) {
 
 // Délégation : fiable même après re-rendu
 view.addEventListener('click', async e => {
+  const ign = e.target.closest('[data-ignore]');
+  if (ign) {
+    await ignorer(ign.dataset.ignore);
+    toast('Événement ignoré (conservé dans Google Agenda)');
+    refreshView();
+    return;
+  }
   const supp = e.target.closest('[data-del-lesson]');
   if (supp) {
     const l = await DB.get('lessons', supp.dataset.delLesson);
@@ -652,6 +688,7 @@ view.addEventListener('click', async e => {
   const item = e.target.closest('.swipe-item');
   if (item && (item.dataset.ignoreClic || item.classList.contains('ouvert'))) {
     item.classList.remove('ouvert'); item.style.transform = '';
+    setTimeout(() => item.parentElement.classList.remove('glisse'), 240);
     return;   // on referme au lieu d'ouvrir la fiche
   }
   const gEl = e.target.closest('[data-gcal]');
@@ -664,15 +701,58 @@ view.addEventListener('click', async e => {
   if (lEl) sheetLesson(lEl.dataset.lesson);
 });
 
+// Cours passés en attente de confirmation
+async function sheetAValider(liste) {
+  const eleves = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
+  openSheet(`<h3>Cours en attente</h3>
+    <div class="sub" style="margin-bottom:12px">Valide les cours qui ont bien eu lieu. Ils rejoindront les cours effectués et seront décomptés du forfait.</div>
+    ${liste.slice().reverse().map(l => `<div class="card">
+      <div class="row"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div>
+      <div class="grow"><div class="title">${esc(eleves[l.studentId] ? eleves[l.studentId].name : (l.title || KINDS[l.kind || 'cours'].label))}</div>
+      <div class="sub">${esc(l.type || '')} · ${fmtHours(l.duration || 60)}</div></div></div>
+      <div class="field-row" style="margin-top:10px">
+        <button class="btn gold" style="margin:0" data-ok="${l.id}">✓ Valider</button>
+        <button class="btn secondary" style="margin:0" data-edit="${l.id}">Modifier</button>
+      </div></div>`).join('')}
+    <button class="btn" id="tout-valider">Tout valider (${liste.length})</button>`);
+
+  $('#sheet').querySelectorAll('[data-ok]').forEach(b => b.onclick = async () => {
+    const l = await DB.get('lessons', b.dataset.ok);
+    l.status = 'done'; await DB.put('lessons', l);
+    const reste = liste.filter(x => x.id !== l.id);
+    closeSheet(); toast('Cours validé ✓'); refreshView();
+    if (reste.length) sheetAValider(reste);
+  });
+  $('#sheet').querySelectorAll('[data-edit]').forEach(b => b.onclick = () => sheetLesson(b.dataset.edit));
+  $('#tout-valider').onclick = async () => {
+    for (const l of liste) { const x = await DB.get('lessons', l.id); if (x) { x.status = 'done'; await DB.put('lessons', x); } }
+    closeSheet(); toast(liste.length + ' cours validés ✓'); refreshView();
+  };
+}
+
 // Liste des événements Google passés non rattachés
 function sheetPastList(events) {
   openSheet(`<h3>Événements passés à rattacher</h3>
     <div class="sub" style="margin-bottom:10px">Rattache-les pour les compter dans les heures effectuées et dans le profil des élèves.</div>
-    ${events.slice().reverse().map(e => `<div class="card tappable row" data-past="${e.id}">
+    ${events.slice().reverse().map(e => `<div class="swipe"><button class="swipe-del ignorer" data-ignore-p="${e.id}">Ignorer</button>
+      <div class="card tappable row swipe-item" data-past="${e.id}">
       <div class="grow"><div class="title">${esc(e.summary || '(sans titre)')}</div>
       <div class="sub">${fmtDate(e.start.dateTime)} · ${fmtTime(e.start.dateTime)}</div></div>
-      <div class="chev">›</div></div>`).join('')}`);
+      <div class="chev">›</div></div></div>`).join('')}`);
+  activerGlissement($('#sheet'));
+  $('#sheet').querySelectorAll('[data-ignore-p]').forEach(b => b.onclick = async () => {
+    await ignorer(b.dataset.ignoreP);
+    toast('Événement ignoré');
+    const restants = events.filter(x => !ignores.has(x.id));
+    closeSheet(); refreshView();
+    if (restants.length) sheetPastList(restants);
+  });
   $('#sheet').querySelectorAll('[data-past]').forEach(el => el.onclick = () => {
+    if (el.dataset.ignoreClic || el.classList.contains('ouvert')) {
+      el.classList.remove('ouvert'); el.style.transform = '';
+      setTimeout(() => el.parentElement.classList.remove('glisse'), 240);
+      return;
+    }
     const ev = events.find(x => x.id === el.dataset.past);
     if (ev) sheetImportGcal(ev);
   });
@@ -730,6 +810,7 @@ async function sheetImportGcal(ev) {
       title: kind === 'cours' ? '' : (ev.summary || KINDS[kind].label),
       date: start.toISOString(), duration: dur,
       type: kind === 'cours' ? $('#f-type').value : KINDS[kind].label,
+      status: start > new Date() ? 'planned' : 'done',
       paid: $('#f-paid').checked,
       fee: ($('#f-paid').checked && kind !== 'cours') ? (+$('#f-fee').value || 0) : 0,
       note: ev.description || '', gcalEventId: ev.id
@@ -765,7 +846,7 @@ async function sheetLesson(id, presetStudent, presetKind) {
       <label class="field"><span>Heure</span><input type="time" id="f-time" value="${d.toTimeString().slice(0, 5)}"></label>
     </div>
     <label class="field"><span>Durée (min)</span><input type="number" id="f-dur" value="${l ? l.duration : 60}"></label>
-    <label class="switch">
+    <label class="switch" id="paid-box">
       <input type="checkbox" id="f-paid" ${!l || l.paid !== false ? 'checked' : ''}>
       <span class="track"></span>
       <span class="lbl">Séance payante<small id="paid-hint"></small></span>
@@ -788,15 +869,18 @@ async function sheetLesson(id, presetStudent, presetKind) {
 
   const refresh = () => {
     const k = $('#f-kind').value;
+    const perso = k === 'perso';
+    if (perso) $('#f-paid').checked = false;          // le perso n'est jamais payant
     const payant = $('#f-paid').checked;
+    $('#paid-box').hidden = perso;
     $('#student-box').hidden = k !== 'cours';
     $('#title-box').hidden = k === 'cours';
     majLieu();
     // le cachet ne concerne que les séances payantes hors cours (concert, prestation…)
     $('#fee-box').style.display = (payant && k !== 'cours') ? '' : 'none';
     $('#paid-hint').textContent = payant
-      ? (k === 'cours' ? 'Décompte un cours du forfait de l\u2019élève' : 'Comptée comme rémunérée')
-      : (k === 'cours' ? 'Cours offert : ne décompte aucun cours du forfait' : 'Non rémunérée (répétition, essai…)');
+      ? (k === 'cours' ? 'Décompte du temps sur le forfait de l\u2019élève' : 'Comptée comme rémunérée')
+      : (k === 'cours' ? 'Cours offert : ne décompte rien du forfait' : 'Non rémunérée (répétition, essai…)');
   };
   $('#f-kind').onchange = refresh;
   $('#f-paid').onchange = refresh;
@@ -814,8 +898,9 @@ async function sheetLesson(id, presetStudent, presetKind) {
     item.date = new Date($('#f-date').value + 'T' + $('#f-time').value).toISOString();
     item.type = k === 'cours' ? $('#f-type').value : KINDS[k].label;
     item.duration = +$('#f-dur').value || 60;
+    if (!l) item.status = new Date(item.date) > Date.now() ? 'planned' : 'done';
     item.lieu = k === 'cours' ? (/collectif/i.test($('#f-type').value) ? 'ecole' : $('#f-lieu').value) : '';
-    item.paid = $('#f-paid').checked;
+    item.paid = k === 'perso' ? false : $('#f-paid').checked;
     item.fee = (item.paid && k !== 'cours') ? (+$('#f-fee').value || 0) : 0;
     item.note = $('#f-note').value;
     await DB.put('lessons', item);   // l'app n'écrit jamais dans Google Agenda
@@ -831,7 +916,7 @@ async function sheetLesson(id, presetStudent, presetKind) {
 let hoursRange = 'month';
 async function renderHours() {
   const all = (await DB.all('lessons'))
-    .filter(l => new Date(l.date) <= Date.now() && estTravail(l))   // le perso ne compte pas
+    .filter(l => new Date(l.date) <= Date.now() && estTravail(l) && estValide(l))   // ni le perso ni les séances non validées
     .sort((a, b) => new Date(b.date) - new Date(a.date));
   const students = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
 
@@ -975,7 +1060,8 @@ async function renderStudentDetail(id) {
   const allItems = await lessonsOf(id);
   const lessons = allItems.filter(l => (l.kind || 'cours') === 'cours');
   const now = Date.now();
-  const past = lessons.filter(l => new Date(l.date) <= now).reverse();
+  const attente = lessons.filter(l => enAttente(l)).reverse();
+  const past = lessons.filter(l => new Date(l.date) <= now && estValide(l)).reverse();
   const next = lessons.filter(l => new Date(l.date) > now);
   const payments = (await DB.byStudent('payments', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const notes = (await DB.byStudent('notes', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -1022,6 +1108,17 @@ async function renderStudentDetail(id) {
       <div class="sub">${esc(p.label || '')} · ${fmtDateFull(p.date)}${p.method ? ' · ' + esc(p.method) : ''}</div></div>
       ${p.collectedBy ? `<span class="badge ghost">${esc(p.collectedBy)}</span>` : ''}<div class="chev">›</div></div>`).join('')}
 
+    ${attente.length ? `<h2 class="section">Cours en attente (${attente.length})</h2>
+    <div class="sub" style="margin-bottom:10px">Ces cours sont passés mais pas encore confirmés. Ils ne décomptent rien du forfait tant qu\u2019ils ne sont pas validés.</div>
+    ${attente.map(l => `<div class="card accent">
+        <div class="row"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div>
+        <div class="grow"><div class="title">${esc(l.type || '')}</div>
+        <div class="sub">${fmtHours(l.duration || 60)}${l.lieu === 'domicile' ? ' · à domicile' : ''}</div></div></div>
+        <div class="field-row" style="margin-top:10px">
+          <button class="btn gold" style="margin:0" data-valider="${l.id}">✓ Valider</button>
+          <button class="btn secondary" style="margin:0" data-modifier="${l.id}">Modifier</button>
+        </div></div>`).join('')}` : ''}
+
     <h2 class="section">Prochains cours</h2>
     <button class="btn secondary" id="add-lesson" style="margin-top:0">＋ Planifier un cours</button>
     ${next.map(l => `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div><div class="grow sub">${esc(l.type || '')}</div><div class="chev">›</div></div>`).join('') || '<div class="sub" style="padding:6px">Aucun cours planifié.</div>'}
@@ -1035,6 +1132,12 @@ async function renderStudentDetail(id) {
   $('#add-pay').onclick = () => sheetPayment(id);
   $('#add-note').onclick = () => sheetNote(id);
   view.querySelectorAll('[data-note]').forEach(el => el.onclick = () => sheetNote(id, el.dataset.note));
+  view.querySelectorAll('[data-valider]').forEach(b => b.onclick = async () => {
+    const l = await DB.get('lessons', b.dataset.valider);
+    l.status = 'done'; await DB.put('lessons', l);
+    toast('Cours validé ✓'); renderStudentDetail(id);
+  });
+  view.querySelectorAll('[data-modifier]').forEach(b => b.onclick = () => sheetLesson(b.dataset.modifier));
   view.querySelectorAll('[data-pay]').forEach(el => el.onclick = () => sheetPayment(id, el.dataset.pay));
 }
 
@@ -1524,6 +1627,8 @@ async function settingsGoogle() {
         <label class="field" style="margin-top:12px"><span>Récupérer les événements depuis le</span>
           <input type="date" id="gc-since" value="${localStorage.getItem('gc_since') || '2026-05-25'}"></label>
         <button class="btn secondary" id="gc-resync">Resynchroniser maintenant</button>
+        ${ignores.size ? `<div class="sub" style="margin-top:10px">${ignores.size} événement(s) ignoré(s).</div>
+          <button class="btn ghost" id="gc-unignore">Réafficher les événements ignorés</button>` : ''}
         <button class="btn danger" id="gc-off">Déconnecter</button>`
       : WORKER_URL ? `<div class="sub">Connecte le compte Google pour récupérer les événements.</div>
         <button class="btn" id="gc-on">Connecter Google Agenda</button>`
@@ -1534,6 +1639,8 @@ async function settingsGoogle() {
   const off = $('#gc-off'); if (off) off.onclick = () => { GC.disconnect(); renderSettings(); };
   const since = $('#gc-since');
   if (since) since.onchange = e => { localStorage.setItem('gc_since', e.target.value); toast('Date enregistrée ✓'); };
+  const unign = $('#gc-unignore');
+  if (unign) unign.onclick = async () => { await reafficherIgnores(); toast('Événements réaffichés ✓'); renderSettings(); };
   const resync = $('#gc-resync');
   if (resync) resync.onclick = async () => {
     resync.textContent = 'Synchronisation…';
@@ -1858,6 +1965,7 @@ function sheetSetCode() {
 (async function start() {
   $('#splash-version').textContent = 'v' + APP_VERSION;
   CURRENCY = await DB.getSetting('currency', 'XPF');
+  await chargerIgnores();
   GC.handleCallback();
   Lock.init();
   $('#topbar-undo').onclick = () => Undo.annuler();
