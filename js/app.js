@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.5.0';
+const APP_VERSION = '3.6.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -86,11 +86,16 @@ const Lock = {
   get delay() { return +(localStorage.getItem('lock_delay') ?? 300000); }, // 5 min par défaut
   set delay(v) { localStorage.setItem('lock_delay', v); },
   touch() { localStorage.setItem('lock_seen', Date.now()); },
+  // au retour d'arrière-plan : on applique le délai choisi
   shouldLock() {
     if (!this.enabled) return false;
-    if (this.delay < 0) return false;                       // jamais
+    if (this.delay < 0) return false;                       // « jamais »
     const seen = +(localStorage.getItem('lock_seen') || 0);
     return Date.now() - seen > this.delay;
+  },
+  // au lancement de l'app : on demande toujours le code (sauf réglage « jamais »)
+  shouldLockAtStart() {
+    return this.enabled && this.delay >= 0;
   },
   buffer: '',
   show() {
@@ -132,7 +137,7 @@ const Lock = {
       else if (this.shouldLock()) this.show();
     });
     setInterval(() => this.touch(), 30000);
-    if (this.shouldLock()) this.show(); else this.touch();
+    if (this.shouldLockAtStart()) this.show(); else this.touch();
   }
 };
 
@@ -411,6 +416,7 @@ document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () =>
 function switchTab(tab) {
   if (tab !== 'settings') settingsPage = null;
   if (tab !== 'students') { currentStudent = null; studentQuery = ''; }
+  if (tab !== 'hours') hoursQuery = '';
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   const t = TABS[tab];
@@ -821,9 +827,11 @@ async function sheetImportGcal(ev) {
 }
 
 // Créer / modifier une séance
-async function sheetLesson(id, presetStudent, presetKind) {
+async function sheetLesson(id, presetStudent, presetKind, presetType) {
   const students = await DB.all('students');
   const { courseTypes } = await getConfig();
+  // pré-sélection d'un type (ex. « collectif » depuis la fiche élève)
+  const typeVoulu = presetType ? (courseTypes.find(t => new RegExp(presetType, 'i').test(t)) || presetType) : null;
   const l = id ? await DB.get('lessons', id) : null;
   const kind = l ? (l.kind || 'cours') : (presetKind || 'cours');
   const d = l ? new Date(l.date) : (() => { const x = new Date(); x.setMinutes(0, 0, 0); x.setHours(x.getHours() + 1); return x; })();
@@ -836,7 +844,7 @@ async function sheetLesson(id, presetStudent, presetKind) {
       <label class="field"><span>Élève</span>
         <select id="f-student">${students.map(s => `<option value="${s.id}" ${(l && l.studentId === s.id) || presetStudent === s.id ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}</select></label>
       <label class="field"><span>Type de cours</span>
-        <select id="f-type">${courseTypes.map(t => `<option ${l && l.type === t ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
+        <select id="f-type">${courseTypes.map(t => `<option ${(l && l.type === t) || (!l && typeVoulu === t) ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></label>
       <label class="field" id="lieu-box"><span>Lieu du cours</span>
         <select id="f-lieu">${Object.entries(LIEUX).map(([v, t]) => `<option value="${v}" ${l && l.lieu === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
     </div>
@@ -914,6 +922,7 @@ async function sheetLesson(id, presetStudent, presetKind) {
 
 // ====== HEURES EFFECTUÉES ======
 let hoursRange = 'month';
+let hoursQuery = '';
 async function renderHours() {
   const all = (await DB.all('lessons'))
     .filter(l => new Date(l.date) <= Date.now() && estTravail(l) && estValide(l))   // ni le perso ni les séances non validées
@@ -978,12 +987,25 @@ async function renderHours() {
       <div class="sub">Ces heures ne sont pas comptées. Toucher pour les rattacher (cours, répétition, concert…).</div></div>`;
 
   html += `<button class="btn secondary" id="add-act">＋ Ajouter une répétition / un concert</button>`;
+  html += `<div class="search" style="margin-top:14px">
+      <input id="h-search" type="search" placeholder="Rechercher un élève, un concert…" value="${esc(hoursQuery)}" autocomplete="off">
+    </div>`;
 
-  if (!inRange.length) html += `<div class="empty"><div class="big">⏱️</div><div class="empty-title">Aucune séance</div>Rien sur la période choisie.</div>`;
+  // filtre de recherche sur le détail
+  const mots = hoursQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const cle = l => [students[l.studentId] ? students[l.studentId].name : '', l.title, l.type,
+    (KINDS[l.kind || 'cours'] || {}).label, l.note].filter(Boolean).join(' ').toLowerCase();
+  const vus = mots.length ? inRange.filter(l => mots.every(m => cle(l).includes(m))) : inRange;
+
+  if (!vus.length) html += `<div class="empty"><div class="big">${mots.length ? '🔎' : '⏱️'}</div>
+      <div class="empty-title">${mots.length ? 'Aucun résultat' : 'Aucune séance'}</div>
+      ${mots.length ? 'Essaie un autre mot.' : 'Rien sur la période choisie.'}</div>`;
   else {
-    html += `<h2 class="section">Détail (${inRange.length})</h2>`;
+    const totalVus = mins(vus);
+    html += `<h2 class="section">Détail (${vus.length})</h2>`;
+    if (mots.length) html += `<div class="search-count">${fmtHours(totalVus)} sur ${fmtHours(mins(inRange))} pour la période</div>`;
     let curDay = '';
-    for (const l of inRange) {
+    for (const l of vus) {
       const key = new Date(l.date).toDateString();
       if (key !== curDay) { curDay = key; html += `<div class="day-head">${fmtDate(l.date)}</div>`; }
       const k = KINDS[l.kind || 'cours'];
@@ -1000,6 +1022,11 @@ async function renderHours() {
   view.querySelectorAll('[data-range]').forEach(b => b.onclick = () => { hoursRange = b.dataset.range; renderHours(); });
   activerGlissement(view);
   $('#add-act').onclick = () => sheetLesson(null, null, 'repetition');
+  const hs = $('#h-search');
+  if (hs) hs.oninput = e => {
+    hoursQuery = e.target.value;
+    clearTimeout(hs._t); hs._t = setTimeout(() => { renderHours(); const n = $('#h-search'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 220);
+  };
   const orph = $('#orphelins'); if (orph) orph.onclick = () => sheetPastList(orphelins);
 }
 
@@ -1060,13 +1087,18 @@ async function renderStudentDetail(id) {
   const allItems = await lessonsOf(id);
   const lessons = allItems.filter(l => (l.kind || 'cours') === 'cours');
   const now = Date.now();
-  const attente = lessons.filter(l => enAttente(l)).reverse();
-  const past = lessons.filter(l => new Date(l.date) <= now && estValide(l)).reverse();
-  const next = lessons.filter(l => new Date(l.date) > now);
+  const individuels = lessons.filter(l => !estCollectif(l));
+  const collectifs = lessons.filter(l => estCollectif(l));
+  const attente = individuels.filter(l => enAttente(l)).reverse();
+  const past = individuels.filter(l => new Date(l.date) <= now && estValide(l)).reverse();
+  const next = individuels.filter(l => new Date(l.date) > now);
+  const collPast = collectifs.filter(l => new Date(l.date) <= now).reverse();
+  const collNext = collectifs.filter(l => new Date(l.date) > now);
   const payments = (await DB.byStudent('payments', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const notes = (await DB.byStudent('notes', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const st = await paymentStatus(s);
   const totalMin = lessons.filter(l => new Date(l.date) <= now).reduce((a, l) => a + (l.duration || 60), 0);
+  const collMin = collPast.reduce((a, l) => a + (l.duration || 60), 0);
 
   view.innerHTML = `
     <button class="btn-inline" id="back">‹ Élèves</button>
@@ -1123,12 +1155,27 @@ async function renderStudentDetail(id) {
     <button class="btn secondary" id="add-lesson" style="margin-top:0">＋ Planifier un cours</button>
     ${next.map(l => `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div><div class="grow sub">${esc(l.type || '')}</div><div class="chev">›</div></div>`).join('') || '<div class="sub" style="padding:6px">Aucun cours planifié.</div>'}
 
-    <h2 class="section">Cours effectués (${past.length})</h2>
-    ${past.map(l => `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}</div><div class="grow sub">${esc(l.type || '')}${l.note ? ' — ' + esc(l.note) : ''}</div></div>`).join('') || '<div class="sub" style="padding:6px">Aucun cours passé.</div>'}
+    <h2 class="section">Cours individuels effectués (${past.length})</h2>
+    ${past.map(l => `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}</div>
+      <div class="grow sub">${esc(l.type || '')}${l.lieu === 'domicile' ? ' · à domicile' : ''}${l.note ? ' — ' + esc(l.note) : ''}</div></div>`).join('') || '<div class="sub" style="padding:6px">Aucun cours passé.</div>'}
+
+    <h2 class="section">Cours collectifs (${collectifs.length})</h2>
+    <div class="sub" style="margin-bottom:10px">Les cours collectifs ont toujours lieu à l\u2019école et ne décomptent rien du forfait individuel.
+      ${collMin ? '<b>' + fmtHours(collMin) + '</b> suivies à ce jour.' : ''}</div>
+    <button class="btn secondary" id="add-coll" style="margin-top:0">＋ Ajouter un cours collectif</button>
+    ${collNext.map(l => `<div class="card tappable row" data-lesson="${l.id}">
+        <div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div>
+        <div class="grow"><div class="title">À venir</div><div class="sub">${esc(l.type || '')} · ${fmtHours(l.duration || 60)}</div></div>
+        <div class="chev">›</div></div>`).join('')}
+    ${collPast.map(l => `<div class="card tappable row" data-lesson="${l.id}">
+        <div class="lesson-time">${fmtDate(l.date)}</div>
+        <div class="grow sub">${esc(l.type || '')} · ${fmtHours(l.duration || 60)}${l.note ? ' — ' + esc(l.note) : ''}</div></div>`).join('')}
+    ${!collectifs.length ? '<div class="sub" style="padding:6px">Aucun cours collectif pour cet élève.</div>' : ''}
   `;
   $('#back').onclick = renderStudents;
   $('#edit-student').onclick = () => sheetStudent(id);
   $('#add-lesson').onclick = () => sheetLesson(null, id);
+  $('#add-coll').onclick = () => sheetLesson(null, id, null, 'collectif');
   $('#add-pay').onclick = () => sheetPayment(id);
   $('#add-note').onclick = () => sheetNote(id);
   view.querySelectorAll('[data-note]').forEach(el => el.onclick = () => sheetNote(id, el.dataset.note));
@@ -1657,12 +1704,14 @@ async function settingsSecurite() {
       ${Lock.enabled ? '<span class="badge ok">Code actif</span>' : '<span class="badge warn">Aucun code</span>'}
       <label class="field" style="margin-top:12px"><span>Verrouiller après</span>
         <select id="lk-delay">${delays.map(([v, t]) => `<option value="${v}" ${Lock.delay === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+      <div class="sub">Le code est demandé à chaque lancement de l\u2019app. Le délai ci-dessus s\u2019applique aux retours depuis l\u2019arrière-plan.</div>
       <button class="btn secondary" id="lk-set">${Lock.enabled ? 'Changer le code' : 'Définir un code à 4 chiffres'}</button>
-      ${Lock.enabled ? '<button class="btn danger" id="lk-off">Désactiver le code</button>' : ''}
+      ${Lock.enabled ? '<button class="btn secondary" id="lk-now">Verrouiller maintenant</button><button class="btn danger" id="lk-off">Désactiver le code</button>' : ''}
     </div>`;
   bindBack();
   $('#lk-delay').onchange = e => { Lock.delay = +e.target.value; toast('Délai enregistré ✓'); };
   $('#lk-set').onclick = () => sheetSetCode();
+  const now = $('#lk-now'); if (now) now.onclick = () => Lock.show();
   const off = $('#lk-off'); if (off) off.onclick = () => { localStorage.removeItem('lock_hash'); toast('Code désactivé'); renderSettings(); };
 }
 
