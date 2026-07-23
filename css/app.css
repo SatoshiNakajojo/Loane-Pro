@@ -57,10 +57,12 @@ body::after{
 
 /* ===== Écran de lancement ===== */
 #splash{
-  position:fixed;inset:0;z-index:200;
+  position:fixed;top:-2px;left:-2px;right:-2px;bottom:-2px;z-index:200;
   display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;
-  background:url("../icons/glitter-dark.png") repeat 0 0,var(--scene);
-  background-size:230px 230px,100% 100%,100% 100%,100% 100%;
+  background-color:#0C1A12;
+  background-image:url("../icons/glitter-dark.png"),var(--scene);
+  background-repeat:repeat,no-repeat;
+  background-size:230px 230px,cover;
   transition:opacity .4s ease;
 }
 #splash.hide{opacity:0;pointer-events:none}
@@ -509,3 +511,15 @@ main > .sub{
   font-weight:400;letter-spacing:.02em;line-height:1.3;
 }
 .stat.hi .stat-dates{color:rgba(243,239,228,.6)}
+
+/* pastille de paiement sur les cours effectués */
+.paye{
+  flex-shrink:0;width:24px;height:24px;border-radius:50%;
+  display:flex;align-items:center;justify-content:center;
+  font-size:.85rem;font-weight:700;
+}
+.paye.oui{background:var(--green-soft);color:var(--green-bright);border:1px solid rgba(63,178,122,.4)}
+.paye.offert{background:var(--gold-soft);color:var(--gold);border:1px solid rgba(227,190,114,.4)}
+.paye.non{
+  background:transparent;border:1.5px dashed rgba(228,121,95,.5);
+}

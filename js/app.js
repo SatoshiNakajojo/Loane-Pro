@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.7.0';
+const APP_VERSION = '3.8.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -247,17 +247,37 @@ const Cloud = {
   },
 
   async restore(ts) {
-    if (!WORKER_URL || !this.pass) { toast('Renseigne la phrase secrète'); return; }
+    if (!WORKER_URL) { toast('WORKER_URL non configuré'); return; }
+    if (!this.pass) { toast('Renseigne la phrase secrète'); return; }
+    let data;
     try {
-      const data = await this.lire(ts);
-      if (!data) { toast('Aucune sauvegarde trouvée'); return; }
-      let n = 0;
-      for (const k of Object.keys(data)) if (Array.isArray(data[k]) && k !== 'settings') n += data[k].length;
-      if (!confirm(`Restaurer ${n} enregistrement(s) ?\n\nIls seront ajoutés à ce qui est déjà sur l\u2019appareil.`)) return;
+      const url = WORKER_URL + '/backup' + (ts ? '?ts=' + encodeURIComponent(ts) : '');
+      const r = await fetch(url, { headers: { 'X-Backup-Key': this.pass } });
+      if (r.status === 404) { toast('Aucune sauvegarde pour cette phrase secrète'); return; }
+      if (r.status === 401) { toast('Phrase secrète refusée (6 car. min.)'); return; }
+      if (!r.ok) { toast('Erreur cloud ' + r.status); return; }
+      const txt = await r.text();
+      if (!txt || txt.length < 2) { toast('Sauvegarde cloud vide'); return; }
+      try { data = JSON.parse(txt); }
+      catch (e) { toast('Sauvegarde illisible (JSON invalide)'); console.error('restore parse', e); return; }
+    } catch (e) {
+      // vraie cause : réseau, CORS, ou domaine bloqué par le worker
+      console.error('restore fetch', e);
+      toast('Connexion au cloud impossible (réseau ?)');
+      return;
+    }
+    let n = 0;
+    for (const k of Object.keys(data)) if (Array.isArray(data[k]) && k !== 'settings') n += data[k].length;
+    if (n === 0) { toast('La sauvegarde ne contient aucune donnée'); return; }
+    if (!confirm(`Restaurer ${n} enregistrement(s) ?\n\nIls seront fusionnés avec ce qui est déjà sur l\u2019appareil.`)) return;
+    try {
       await DB.importAll(data);
       toast('Restauré : ' + n + ' enregistrement(s) ✓');
       refreshView();
-    } catch (e) { toast('Échec de la restauration'); }
+    } catch (e) {
+      console.error('restore import', e);
+      toast('Erreur pendant l\u2019écriture locale');
+    }
   },
 
   auto() {
@@ -360,6 +380,27 @@ async function lessonsOf(studentId) {
 function addMonths(d, m) { const x = new Date(d); x.setMonth(x.getMonth() + m); return x; }
 
 // État des paiements + validité des forfaits
+// Marque chaque cours décomptable comme payé ou non, dans l'ordre chronologique.
+// Chaque paiement crédite un capital d'heures que les cours suivants consomment.
+async function coverageMap(student) {
+  const seances = (await lessonsOf(student.id))
+    .filter(l => (l.kind || 'cours') === 'cours' && l.paid !== false && !estCollectif(l) && estValide(l))
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  const payments = (await DB.byStudent('payments', student.id)).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const map = {};
+  let credit = 0, ip = 0;
+  for (const l of seances) {
+    // on ajoute au crédit tous les paiements intervenus jusqu'à ce cours
+    while (ip < payments.length && new Date(payments[ip].date) <= new Date(l.date)) {
+      credit += paiementMinutes(payments[ip]); ip++;
+    }
+    const besoin = l.duration || 60;
+    if (credit >= besoin) { map[l.id] = true; credit -= besoin; }
+    else { map[l.id] = false; }
+  }
+  return map;
+}
+
 async function paymentStatus(student) {
   const seances = (await lessonsOf(student.id)).filter(l => (l.kind || 'cours') === 'cours');
   const payments = (await DB.byStudent('payments', student.id)).sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -1070,10 +1111,10 @@ async function renderStudents() {
     const st = await paymentStatus(s);
     let badge = '';
     if (st.aucuneActivite) badge = '<span class="badge ghost">Nouvel élève</span>';
-    else if (!st.last) badge = st.due ? '<span class="badge due">À encaisser</span>' : '';
     else if (st.expired) badge = '<span class="badge due">Forfait expiré</span>';
-    else if (st.remainingMin <= 0) badge = '<span class="badge due">À encaisser</span>';
-    else badge = `<span class="badge ok">${fmtHours(st.remainingMin)}</span>`;
+    else if (st.remainingMin < 0) badge = `<span class="badge due">${fmtHours(-st.remainingMin)} à régler</span>`;
+    else if (st.remainingMin > 0) badge = `<span class="badge ok">${fmtHours(st.remainingMin)}</span>`;
+    // remainingMin === 0 : rien à afficher
     cartes.push({
       cle: [s.name, s.phone, s.email, s.level, descriptionOf(s)].filter(Boolean).join(' ').toLowerCase(),
       html: `<div class="card tappable row" data-student="${s.id}">
@@ -1122,6 +1163,7 @@ async function renderStudentDetail(id) {
   const payments = (await DB.byStudent('payments', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const notes = (await DB.byStudent('notes', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const st = await paymentStatus(s);
+  const couverture = await coverageMap(s);
   const totalMin = lessons.filter(l => new Date(l.date) <= now).reduce((a, l) => a + (l.duration || 60), 0);
   const collMin = collPast.reduce((a, l) => a + (l.duration || 60), 0);
 
@@ -1134,8 +1176,8 @@ async function renderStudentDetail(id) {
       <div style="margin-top:8px">
         ${st.aucuneActivite ? '<span class="badge ghost">Nouvel élève</span>'
       : st.expired ? '<span class="badge due">Forfait expiré</span>'
-        : st.remainingMin > 0 ? `<span class="badge ok">${fmtHours(st.remainingMin)} restante${st.remainingMin > 60 ? 's' : ''}</span>`
-          : st.due ? '<span class="badge due">Paiement attendu</span>' : ''}
+        : st.remainingMin < 0 ? `<span class="badge due">${fmtHours(-st.remainingMin)} à régler</span>`
+          : st.remainingMin > 0 ? `<span class="badge ok">${fmtHours(st.remainingMin)} restante${st.remainingMin > 60 ? 's' : ''}</span>` : ''}
         ${st.expiry && !st.expired ? `<span class="badge warn">jusqu\u2019au ${fmtDateFull(st.expiry)}</span>` : ''}
         ${st.notStarted ? '<span class="badge info">démarre au 1er cours</span>' : ''}
       </div>
@@ -1181,8 +1223,15 @@ async function renderStudentDetail(id) {
     ${next.map(l => `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div><div class="grow sub">${esc(l.type || '')}</div><div class="chev">›</div></div>`).join('') || '<div class="sub" style="padding:6px">Aucun cours planifié.</div>'}
 
     <h2 class="section">Cours individuels effectués (${past.length})</h2>
-    ${past.map(l => `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}</div>
-      <div class="grow sub">${esc(l.type || '')}${l.lieu === 'domicile' ? ' · à domicile' : ''}${l.note ? ' — ' + esc(l.note) : ''}</div></div>`).join('') || '<div class="sub" style="padding:6px">Aucun cours passé.</div>'}
+    ${past.map(l => {
+      const paye = couverture[l.id];
+      const pastille = l.paid === false ? '<span class="paye offert" title="Cours offert">✦</span>'
+        : paye ? '<span class="paye oui" title="Payé">✓</span>'
+          : '<span class="paye non" title="En attente de règlement"></span>';
+      return `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}</div>
+      <div class="grow sub">${esc(l.type || '')}${l.lieu === 'domicile' ? ' · à domicile' : ''}${l.note ? ' — ' + esc(l.note) : ''}</div>
+      ${pastille}</div>`;
+    }).join('') || '<div class="sub" style="padding:6px">Aucun cours passé.</div>'}
 
     <h2 class="section">Cours collectifs (${collectifs.length})</h2>
     <div class="sub" style="margin-bottom:10px">Les cours collectifs ont toujours lieu à l\u2019école et ne décomptent rien du forfait individuel.
@@ -1791,6 +1840,7 @@ async function settingsData() {
       </table>
     </div>
     <button class="btn secondary" id="cl-check">🔍 Comparer avec le cloud</button>
+    <button class="btn ghost" id="cl-test">Tester l\u2019accès au cloud</button>
     ${cloudSnapshot ? '<div class="sub" style="text-align:center;margin-top:6px">Comparaison faite à l\u2019instant.</div>' : ''}
 
     <h2 class="section">Historique cloud</h2>
@@ -1825,6 +1875,20 @@ async function settingsData() {
       Cloud.pass = p; await Cloud.restore();
     };
   }
+  const test = $('#cl-test');
+  if (test) test.onclick = async () => {
+    if (!WORKER_URL) { toast('WORKER_URL manquant dans js/config.js'); return; }
+    if (!Cloud.pass) { toast('Renseigne la phrase secrète'); return; }
+    test.textContent = 'Test en cours…';
+    try {
+      const r = await fetch(WORKER_URL + '/backup', { headers: { 'X-Backup-Key': Cloud.pass } });
+      if (r.status === 404) toast('Connexion OK, mais aucune sauvegarde pour cette phrase');
+      else if (r.status === 401) toast('Phrase secrète refusée');
+      else if (r.ok) { const t = await r.text(); const d = JSON.parse(t); let n = 0; for (const k of Object.keys(d)) if (Array.isArray(d[k]) && k !== 'settings') n += d[k].length; toast('Connexion OK · ' + n + ' enregistrement(s) dans le cloud'); }
+      else toast('Réponse cloud : ' + r.status);
+    } catch (e) { toast('Connexion impossible (réseau/CORS)'); console.error(e); }
+    test.textContent = 'Tester l\u2019accès au cloud';
+  };
   const check = $('#cl-check');
   if (check) check.onclick = async () => {
     if (!WORKER_URL || !Cloud.pass) { toast('Configure la phrase secrète'); return; }
