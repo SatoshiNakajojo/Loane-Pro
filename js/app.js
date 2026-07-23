@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.6.0';
+const APP_VERSION = '3.7.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -794,6 +794,11 @@ async function sheetImportGcal(ev) {
       <span class="lbl">Séance payante<small id="paid-hint"></small></span>
     </label>
     <div id="fee-box" hidden><label class="field"><span>Cachet perçu</span><input type="number" id="f-fee" value="0"></label></div>
+    <label class="switch">
+      <input type="checkbox" id="f-done" ${start <= new Date() ? 'checked' : ''}>
+      <span class="track"></span>
+      <span class="lbl">Séance confirmée<small>Décochée, elle passera en « cours en attente » à valider</small></span>
+    </label>
     <button class="btn" id="f-import">Rattacher</button>
   `);
   const refresh = () => {
@@ -816,7 +821,7 @@ async function sheetImportGcal(ev) {
       title: kind === 'cours' ? '' : (ev.summary || KINDS[kind].label),
       date: start.toISOString(), duration: dur,
       type: kind === 'cours' ? $('#f-type').value : KINDS[kind].label,
-      status: start > new Date() ? 'planned' : 'done',
+      status: $('#f-done').checked ? 'done' : 'planned',
       paid: $('#f-paid').checked,
       fee: ($('#f-paid').checked && kind !== 'cours') ? (+$('#f-fee').value || 0) : 0,
       note: ev.description || '', gcalEventId: ev.id
@@ -954,12 +959,23 @@ async function renderHours() {
   const revenue = inRange.reduce((s, l) => s + (l.fee || 0), 0);
   const offertMin = mins(inRange.filter(l => l.paid === false));
 
+  const finSemaine = new Date(startWeek.getTime() + 6 * 864e5);
+  const jm = d => new Date(d).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
+  const premiere = all.length ? new Date(all[all.length - 1].date) : null;
+
   let html = `
     <div class="stat-grid">
-      <div class="stat hi"><b>${fmtHours(weekMin)}</b><span>cette semaine</span></div>
-      <div class="stat hi"><b>${fmtHours(monthMin)}</b><span>ce mois-ci</span></div>
-      <div class="stat"><b>${fmtHours(avgWeek)}</b><span>moyenne / semaine</span></div>
-      <div class="stat"><b>${fmtHours(avgMonth)}</b><span>moyenne / mois</span></div>
+      <div class="stat hi"><b>${fmtHours(weekMin)}</b><span>cette semaine</span>
+        <div class="stat-dates">sem. ${isoWeek(startWeek)} · ${jm(startWeek)} → ${jm(finSemaine)}</div></div>
+      <div class="stat hi"><b>${fmtHours(monthMin)}</b><span>ce mois-ci</span>
+        <div class="stat-dates">${startMonth.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })}</div></div>
+      <div class="stat"><b>${fmtHours(avgWeek)}</b><span>moyenne / semaine</span>
+        <div class="stat-dates">${premiere ? 'depuis le ' + fmtDateFull(premiere) : '—'}</div></div>
+      <div class="stat"><b>${fmtHours(avgMonth)}</b><span>moyenne / mois</span>
+        <div class="stat-dates">${premiere ? 'sur ' + Math.max(1, (now.getFullYear() - premiere.getFullYear()) * 12 + now.getMonth() - premiere.getMonth() + 1) + ' mois' : '—'}</div></div>
+    </div>
+    <div class="sub" style="text-align:center;margin:-8px 0 14px">
+      ${premiere ? `Statistiques calculées sur ${all.length} séance${all.length > 1 ? 's' : ''} validée${all.length > 1 ? 's' : ''}, du ${fmtDateFull(premiere)} à aujourd\u2019hui.` : 'Aucune séance enregistrée.'}
     </div>
     <div class="seg">
       <button data-range="week" class="${hoursRange === 'week' ? 'on' : ''}">Semaine</button>
@@ -968,7 +984,10 @@ async function renderHours() {
     </div>`;
 
   if (Object.keys(byKind).length) {
-    html += `<div class="card"><div class="sub" style="margin-bottom:6px">Répartition · total ${fmtHours(mins(inRange))}</div>
+    const libPeriode = hoursRange === 'week' ? `semaine ${isoWeek(startWeek)} (${jm(startWeek)} → ${jm(finSemaine)})`
+      : hoursRange === 'month' ? startMonth.toLocaleDateString('fr-FR', { month: 'long', year: 'numeric' })
+        : premiere ? `depuis le ${fmtDateFull(premiere)}` : 'tout l\u2019historique';
+    html += `<div class="card"><div class="sub" style="margin-bottom:6px">Répartition · ${esc(libPeriode)} · total ${fmtHours(mins(inRange))}</div>
       ${Object.keys(KINDS).filter(k => KINDS[k].travail !== false).map(k => `<div class="row" style="padding:3px 0">
         <div class="grow"${byKind[k] ? '' : ' style="opacity:.5"'}>${KINDS[k].icon} ${KINDS[k].label}</div>
         <div class="title"${byKind[k] ? '' : ' style="opacity:.5"'}>${fmtHours(byKind[k] || 0)}</div></div>`).join('')}
@@ -976,6 +995,11 @@ async function renderHours() {
       ${revenue ? `<div class="row" style="padding:3px 0"><div class="grow title">Cachets encaissés</div><div class="title" style="color:var(--orange)">${fmtMoney(revenue)}</div></div>` : ''}
     </div>`;
   }
+
+  const aValider = (await DB.all('lessons')).filter(enAttente);
+  if (aValider.length) html += `<div class="card accent tappable" id="a-valider-h">
+      <div class="title">✓ ${aValider.length} séance${aValider.length > 1 ? 's' : ''} à valider</div>
+      <div class="sub">Non comptée${aValider.length > 1 ? 's' : ''} dans les statistiques tant qu\u2019elle${aValider.length > 1 ? 's ne sont' : ' n\u2019est'} pas confirmée${aValider.length > 1 ? 's' : ''}.</div></div>`;
 
   // les événements Google non rattachés ne sont comptés nulle part : on le signale
   const lies = new Set((await DB.all('lessons')).map(l => l.gcalEventId).filter(Boolean));
@@ -1028,6 +1052,7 @@ async function renderHours() {
     clearTimeout(hs._t); hs._t = setTimeout(() => { renderHours(); const n = $('#h-search'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 220);
   };
   const orph = $('#orphelins'); if (orph) orph.onclick = () => sheetPastList(orphelins);
+  const avh = $('#a-valider-h'); if (avh) avh.onclick = () => sheetAValider(aValider);
 }
 
 // ====== ÉLÈVES ======
@@ -2025,6 +2050,12 @@ function sheetSetCode() {
     $('#splash').classList.add('hide');
     setTimeout(() => $('#splash').remove(), 500);
   }, 1250);
+
+  // rappel discret s'il reste des séances à confirmer
+  setTimeout(async () => {
+    const n = (await DB.all('lessons')).filter(enAttente).length;
+    if (n) toast(n + ' séance' + (n > 1 ? 's' : '') + ' à valider');
+  }, 2600);
 
   if (GC.connected) {
     GC.pullEvents()
