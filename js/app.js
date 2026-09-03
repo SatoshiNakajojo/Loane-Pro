@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.8.0';
+const APP_VERSION = '3.8.1';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -141,62 +141,217 @@ const Lock = {
   }
 };
 
+// ====== Identifiants (jetons Google, phrase secrète) ======
+// iOS efface localStorage au bout de quelques jours sans ouvrir l'app : la connexion
+// Google sautait et la phrase secrète du cloud disparaissait, arrêtant les sauvegardes
+// sans le moindre message. On garde donc une copie dans IndexedDB (non exportée).
+const Creds = {
+  CLES: ['gc_refresh', 'cloud_pass'],
+  async charger() {
+    for (const k of this.CLES) {
+      const local = localStorage.getItem(k);
+      const garde = await DB.getLocal(k, null);
+      if (local && local !== garde) await DB.setLocal(k, local);     // localStorage fait foi
+      else if (!local && garde) localStorage.setItem(k, garde);      // restauration après purge
+    }
+    // demande au navigateur de ne pas effacer nos données (accordé si l'app est installée)
+    try { if (navigator.storage && navigator.storage.persist) await navigator.storage.persist(); } catch (e) { }
+  },
+  set(k, v) { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); DB.setLocal(k, v || null); },
+  oublier(k) { localStorage.removeItem(k); DB.delLocal(k); }
+};
+
 // ====== Google Agenda ======
+const GC_DEPUIS_DEFAUT = '2026-05-25';
+
+// Un événement Google peut être horaire (start.dateTime) ou sur la journée (start.date).
+// Les événements « journée entière » étaient purement et simplement ignorés.
+const gcJournee = e => !!(e.start && !e.start.dateTime && e.start.date);
+const gcDebut = e => (e.start && e.start.dateTime) || ((e.start && e.start.date) ? e.start.date + 'T09:00:00' : null);
+const gcFin = e => (e.end && e.end.dateTime) || null;
+
+class ErreurGoogle extends Error {
+  constructor(cause) { super(cause); this.cause = cause; }
+}
+const MESSAGE_GOOGLE = {
+  reconnecter: 'Autorisation Google expirée — reconnecte le compte',
+  reseau: 'Google injoignable (réseau ?)',
+  worker: 'Worker Cloudflare injoignable',
+  api: 'Google a refusé la demande'
+};
+
 const GC = {
+  probleme: '',          // '' | 'reconnecter' | 'reseau' | 'worker' | 'api'
+  _refreshEnCours: null,
+  derniereSync: 0,
+
   get connected() { return !!localStorage.getItem('gc_refresh'); },
+  get aReconnecter() { return this.connected && this.probleme === 'reconnecter'; },
+
   connect() {
-    if (!WORKER_URL) { toast('Configure d\u2019abord WORKER_URL'); return; }
+    if (!WORKER_URL) { toast('Configure d’abord WORKER_URL'); return; }
     location.href = WORKER_URL + '/auth/start?redirect=' + encodeURIComponent(location.origin + location.pathname);
   },
-  disconnect() { ['gc_refresh', 'gc_access', 'gc_expiry'].forEach(k => localStorage.removeItem(k)); },
-  handleCallback() {
-    if (location.hash.startsWith('#gc=')) {
-      try {
-        const tok = JSON.parse(atob(decodeURIComponent(location.hash.slice(4))));
-        if (tok.refresh_token) localStorage.setItem('gc_refresh', tok.refresh_token);
-        localStorage.setItem('gc_access', tok.access_token);
-        localStorage.setItem('gc_expiry', Date.now() + (tok.expires_in - 60) * 1000);
-        toast('Google Agenda connecté ✓');
-      } catch (e) { console.error(e); }
-      history.replaceState(null, '', location.pathname);
-    }
+
+  async disconnect() {
+    Creds.oublier('gc_refresh');
+    ['gc_access', 'gc_expiry'].forEach(k => localStorage.removeItem(k));
+    this.probleme = '';
+    gcalCache = [];
+    await DB.setLocal('gc_cache', null);
   },
-  async token() {
-    if (Date.now() < +(localStorage.getItem('gc_expiry') || 0)) return localStorage.getItem('gc_access');
-    const r = await fetch(WORKER_URL + '/auth/refresh', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: localStorage.getItem('gc_refresh') })
-    });
-    if (!r.ok) throw new Error('refresh failed');
-    const tok = await r.json();
+
+  // Retour de Google : les jetons arrivent dans le fragment d'URL (#gc=...)
+  handleCallback() {
+    if (!location.hash.startsWith('#gc=')) return;
+    let tok = null;
+    try {
+      const brut = decodeURIComponent(location.hash.slice(4)).replace(/-/g, '+').replace(/_/g, '/');
+      const bin = atob(brut + '='.repeat((4 - brut.length % 4) % 4));
+      tok = JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+    } catch (e) { console.error('callback Google', e); }
+    history.replaceState(null, '', location.pathname);
+    if (!tok) { toast('Retour de Google illisible'); return; }
+    // le worker renvoie maintenant aussi les erreurs, au lieu d'une page blanche
+    if (tok.error) {
+      toast(tok.error === 'access_denied' ? 'Connexion Google annulée' : 'Erreur Google : ' + tok.error);
+      console.error('OAuth', tok);
+      return;
+    }
+    if (!tok.access_token) { toast('Google n’a pas renvoyé de jeton'); return; }
+    if (tok.refresh_token) Creds.set('gc_refresh', tok.refresh_token);
+    const duree = Number(tok.expires_in) > 0 ? Number(tok.expires_in) : 3600;
     localStorage.setItem('gc_access', tok.access_token);
-    localStorage.setItem('gc_expiry', Date.now() + (tok.expires_in - 60) * 1000);
+    localStorage.setItem('gc_expiry', Date.now() + (duree - 120) * 1000);
+    this.probleme = '';
+    toast('Google Agenda connecté ✓');
+  },
+
+  // Jeton d'accès valide, renouvelé au besoin. Une seule demande à la fois :
+  // plusieurs appels simultanés déclenchaient autant de rafraîchissements.
+  token() {
+    const acc = localStorage.getItem('gc_access');
+    if (acc && Date.now() < +(localStorage.getItem('gc_expiry') || 0)) return Promise.resolve(acc);
+    if (!this._refreshEnCours) {
+      this._refreshEnCours = this._refresh().finally(() => { this._refreshEnCours = null; });
+    }
+    return this._refreshEnCours;
+  },
+
+  async _refresh() {
+    const rt = localStorage.getItem('gc_refresh');
+    if (!rt) { this.probleme = 'reconnecter'; throw new ErreurGoogle('reconnecter'); }
+    let r;
+    try {
+      r = await fetch(WORKER_URL + '/auth/refresh', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rt })
+      });
+    } catch (e) { this.probleme = 'worker'; throw new ErreurGoogle('worker'); }
+
+    const tok = await r.json().catch(() => ({}));
+    if (r.status === 401 || tok.error === 'invalid_grant') {
+      // Autorisation révoquée, mot de passe Google changé, ou application encore en
+      // mode « Test » côté Google : dans ce cas le jeton expire au bout de 7 jours.
+      // On garde le compte affiché mais on demande explicitement une reconnexion.
+      ['gc_access', 'gc_expiry'].forEach(k => localStorage.removeItem(k));
+      this.probleme = 'reconnecter';
+      throw new ErreurGoogle('reconnecter');
+    }
+    if (!r.ok || !tok.access_token) { this.probleme = 'reseau'; throw new ErreurGoogle('reseau'); }
+
+    const duree = Number(tok.expires_in) > 0 ? Number(tok.expires_in) : 3600;
+    localStorage.setItem('gc_access', tok.access_token);
+    localStorage.setItem('gc_expiry', Date.now() + (duree - 120) * 1000);
+    this.probleme = '';
     return tok.access_token;
   },
-  async api(path, opts = {}) {
+
+  async api(path, essai = 0) {
     const t = await this.token();
-    const r = await fetch('https://www.googleapis.com/calendar/v3' + path, {
-      ...opts, headers: { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json', ...(opts.headers || {}) }
-    });
+    let r;
+    try {
+      r = await fetch('https://www.googleapis.com/calendar/v3' + path, {
+        headers: { Authorization: 'Bearer ' + t, 'Content-Type': 'application/json' }
+      });
+    } catch (e) { this.probleme = 'reseau'; throw new ErreurGoogle('reseau'); }
+
+    // jeton refusé alors qu'il semblait valide : on force un renouvellement, une fois
+    if (r.status === 401 && essai === 0) {
+      localStorage.removeItem('gc_expiry');
+      return this.api(path, 1);
+    }
+    if (r.status === 401) { this.probleme = 'reconnecter'; throw new ErreurGoogle('reconnecter'); }
     if (r.status === 204) return null;
-    if (!r.ok) throw new Error('Google API ' + r.status);
+    if (!r.ok) {
+      console.error('Google API', r.status, await r.text().catch(() => ''));
+      this.probleme = 'api';
+      throw new ErreurGoogle('api');
+    }
     return r.json();
   },
+
+  // Récupère les événements du calendrier principal.
+  // Avant : une seule page de 800 événements, les journées entières exclues.
   async pullEvents() {
     if (!this.connected) return [];
-    const depuis = localStorage.getItem('gc_since') || '2026-05-25';
-    const min = new Date(depuis + 'T00:00:00').toISOString();
-    const max = new Date(Date.now() + 120 * 864e5).toISOString();
-    const data = await this.api(`/calendars/primary/events?timeMin=${min}&timeMax=${max}&singleEvents=true&orderBy=startTime&maxResults=800`);
-    return (data.items || []).filter(e => e.start && e.start.dateTime);
+    let min = new Date((localStorage.getItem('gc_since') || GC_DEPUIS_DEFAUT) + 'T00:00:00');
+    if (isNaN(min)) min = new Date(Date.now() - 180 * 864e5);
+    const max = new Date(Date.now() + 365 * 864e5);
+    const avecJournees = localStorage.getItem('gc_journees') !== '0';
+    const base = '/calendars/primary/events'
+      + '?timeMin=' + encodeURIComponent(min.toISOString())
+      + '&timeMax=' + encodeURIComponent(max.toISOString())
+      + '&singleEvents=true&orderBy=startTime&maxResults=250';
+
+    const out = [];
+    let page = '';
+    for (let i = 0; i < 20; i++) {                       // 20 pages = 5000 événements
+      const data = await this.api(base + (page ? '&pageToken=' + encodeURIComponent(page) : ''));
+      for (const e of (data && data.items) || []) {
+        if (e.status === 'cancelled') continue;          // instance supprimée d'une série
+        if (!e.start || (!e.start.dateTime && !e.start.date)) continue;
+        if (!avecJournees && gcJournee(e)) continue;
+        out.push(e);
+      }
+      page = (data && data.nextPageToken) || '';
+      if (!page) break;
+    }
+    this.probleme = '';
+    this.derniereSync = Date.now();
+    // conservé en local : l'agenda reste complet au redémarrage et hors ligne
+    await DB.setLocal('gc_cache', { date: this.derniereSync, events: out });
+    return out;
+  },
+
+  // Cache relu au lancement, pour ne pas afficher un agenda amputé le temps de la synchro
+  async chargerCache() {
+    const c = await DB.getLocal('gc_cache', null);
+    if (c && Array.isArray(c.events)) { this.derniereSync = c.date || 0; return c.events; }
+    return [];
+  },
+
+  // Synchro complète avec message d'erreur explicite (au lieu de « Échec de la synchro »)
+  async synchroniser(silencieux) {
+    try {
+      gcalCache = await this.pullEvents();
+      if (!silencieux) toast(gcalCache.length + ' événement(s) Google ✓');
+      return true;
+    } catch (e) {
+      const msg = MESSAGE_GOOGLE[e && e.cause] || 'Échec de la synchro';
+      if (!silencieux || e.cause === 'reconnecter') toast(msg);
+      console.error('synchro Google', e);
+      return false;
+    }
   }
 };
 
 // ====== Sauvegarde cloud ======
 const Cloud = {
   get pass() { return localStorage.getItem('cloud_pass') || ''; },
-  set pass(v) { v ? localStorage.setItem('cloud_pass', v) : localStorage.removeItem('cloud_pass'); },
+  set pass(v) { Creds.set('cloud_pass', v || ''); },
   get lastBackup() { return +(localStorage.getItem('cloud_last') || 0); },
+  derniereErreur: '',
 
   // nombre d'enregistrements réels (hors réglages)
   async localCount() {
@@ -205,29 +360,64 @@ const Cloud = {
     return n;
   },
 
+  // Empreinte du dernier envoi réussi : inutile de renvoyer 3 Mo si rien n'a changé
+  // (les écritures KV de Cloudflare sont limitées à 1000 par jour).
+  async empreinte(txt) {
+    const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(txt));
+    return [...new Uint8Array(b)].slice(0, 12).map(x => x.toString(16).padStart(2, '0')).join('');
+  },
+
   async backup(silent, force) {
-    if (!WORKER_URL || !this.pass) { if (!silent) toast('Configure la phrase secrète'); return false; }
+    if (!WORKER_URL) { if (!silent) toast('WORKER_URL non configuré'); return false; }
+    if (!this.pass) { if (!silent) toast('Configure la phrase secrète'); return false; }
     const n = await this.localCount();
     // sécurité locale : on n'envoie jamais une base vide par-dessus une sauvegarde existante
     if (n === 0 && this.lastBackup && !force) {
+      this.derniereErreur = 'Base locale vide : envoi bloqué';
       if (!silent) toast('Base vide : envoi bloqué pour protéger le cloud');
       console.warn('sauvegarde annulée : base locale vide');
       return false;
     }
+    if (!navigator.onLine) { this.derniereErreur = 'Hors ligne'; if (!silent) toast('Hors ligne'); return false; }
+
+    let corps;
+    try { corps = JSON.stringify(await DB.exportAll()); }
+    catch (e) { this.derniereErreur = 'Lecture locale impossible'; if (!silent) toast('Lecture des données impossible'); return false; }
+
+    const sig = await this.empreinte(corps);
+    if (!force && sig === localStorage.getItem('cloud_sig')) {
+      this.derniereErreur = '';
+      if (!silent) toast('Déjà à jour dans le cloud ✓');
+      return true;                                   // rien à envoyer
+    }
+
     try {
       const entetes = { 'Content-Type': 'application/json', 'X-Backup-Key': this.pass };
       if (force) entetes['X-Force'] = '1';
-      const r = await fetch(WORKER_URL + '/backup', { method: 'PUT', headers: entetes, body: JSON.stringify(await DB.exportAll()) });
+      const r = await fetch(WORKER_URL + '/backup', { method: 'PUT', headers: entetes, body: corps });
+
       if (r.status === 409) {
         const d = await r.json().catch(() => ({}));
-        toast(`Envoi refusé : ${d.envoye} contre ${d.cloud} dans le cloud`);
+        this.derniereErreur = `Envoi refusé : ${d.envoye} enregistrement(s) contre ${d.cloud} dans le cloud`;
+        if (!silent) toast(this.derniereErreur);
         return false;
       }
-      if (!r.ok) throw new Error(await r.text());
+      if (r.status === 401) { this.derniereErreur = 'Phrase secrète refusée'; if (!silent) toast(this.derniereErreur); return false; }
+      if (r.status === 501) { this.derniereErreur = 'Stockage KV absent sur le worker'; if (!silent) toast(this.derniereErreur); return false; }
+      if (r.status === 413) { this.derniereErreur = 'Sauvegarde trop volumineuse (max 20 Mo)'; if (!silent) toast(this.derniereErreur); return false; }
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + await r.text().catch(() => ''));
+
       localStorage.setItem('cloud_last', Date.now());
+      localStorage.setItem('cloud_sig', sig);
+      this.derniereErreur = '';
       if (!silent) toast('Sauvegardé dans le cloud ✓');
       return true;
-    } catch (e) { if (!silent) toast('Échec de la sauvegarde'); return false; }
+    } catch (e) {
+      this.derniereErreur = navigator.onLine ? 'Cloud injoignable (worker / CORS ?)' : 'Hors ligne';
+      console.error('sauvegarde cloud', e);
+      if (!silent) toast(this.derniereErreur);
+      return false;
+    }
   },
 
   async lire(ts) {
@@ -244,6 +434,17 @@ const Cloud = {
       const r = await fetch(WORKER_URL + '/backup?list=1', { headers: { 'X-Backup-Key': this.pass } });
       return r.ok ? await r.json() : [];
     } catch (e) { return []; }
+  },
+
+  // Date/volume de la dernière sauvegarde sans télécharger tout le contenu
+  async meta() {
+    if (!WORKER_URL || !this.pass) return null;
+    try {
+      const r = await fetch(WORKER_URL + '/backup?meta=1', { headers: { 'X-Backup-Key': this.pass } });
+      if (!r.ok) return null;
+      const m = await r.json();
+      return m && m.vide ? null : m;
+    } catch (e) { return null; }
   },
 
   async restore(ts) {
@@ -269,14 +470,15 @@ const Cloud = {
     let n = 0;
     for (const k of Object.keys(data)) if (Array.isArray(data[k]) && k !== 'settings') n += data[k].length;
     if (n === 0) { toast('La sauvegarde ne contient aucune donnée'); return; }
-    if (!confirm(`Restaurer ${n} enregistrement(s) ?\n\nIls seront fusionnés avec ce qui est déjà sur l\u2019appareil.`)) return;
+    if (!confirm(`Restaurer ${n} enregistrement(s) ?\n\nIls seront fusionnés avec ce qui est déjà sur l’appareil.`)) return;
     try {
       await DB.importAll(data);
+      localStorage.removeItem('cloud_sig');       // la base a changé : prochain envoi réel
       toast('Restauré : ' + n + ' enregistrement(s) ✓');
       refreshView();
     } catch (e) {
       console.error('restore import', e);
-      toast('Erreur pendant l\u2019écriture locale');
+      toast('Erreur pendant l’écriture locale');
     }
   },
 
@@ -288,28 +490,67 @@ const Cloud = {
 // --- Sauvegarde automatique déclenchée par toute écriture ---
 Cloud.pending = false;
 Cloud.timer = null;
-Cloud.schedule = function () {
-  if (!WORKER_URL || !this.pass) return;      // cloud non configuré : on ne fait rien
+Cloud.essais = 0;
+Cloud.enCours = false;
+
+Cloud.schedule = function (delai) {
+  if (!WORKER_URL) return;
+  if (!this.pass) {
+    // Phrase secrète absente. Si le cloud a déjà servi sur cet appareil, c'est une
+    // anomalie (localStorage purgé par iOS) : on la signale au lieu de ne rien faire.
+    if (this.lastBackup) { this.derniereErreur = 'Phrase secrète perdue — à ressaisir'; cloudBadge('absent'); }
+    return;
+  }
   this.pending = true;
   cloudBadge('en attente');
   clearTimeout(this.timer);
-  this.timer = setTimeout(async () => {
-    cloudBadge('envoi');
-    const ok = await this.backup(true);
-    this.pending = !ok;
-    cloudBadge(ok ? 'ok' : 'erreur');
-    if (!ok) setTimeout(() => this.schedule(), 60000);   // nouvelle tentative dans 1 min
-  }, 3500);
+  this.timer = setTimeout(() => this.envoyer(), delai || 3500);
 };
+
+Cloud._debutEnvoi = 0;
+Cloud.envoyer = async function () {
+  // verrou daté : si l'app a été gelée en plein envoi, on ne reste pas bloqué à vie
+  if (this.enCours && Date.now() - this._debutEnvoi < 120000) return;
+  this.enCours = true; this._debutEnvoi = Date.now();
+  clearTimeout(this.timer);
+  cloudBadge('envoi');
+  let ok = false;
+  try { ok = await this.backup(true); } finally { this.enCours = false; }
+  this.pending = !ok;
+  cloudBadge(ok ? 'ok' : 'erreur');
+  if (ok) { this.essais = 0; return; }
+  // Nouvelle tentative avec un délai croissant (1, 2, 4, 8, 15 min) au lieu
+  // d'un rappel toutes les minutes qui resérialisait toute la base à chaque fois.
+  this.essais = Math.min(this.essais + 1, 5);
+  if (this.essais < 5 || navigator.onLine) {
+    this.schedule(Math.min(60000 * Math.pow(2, this.essais - 1), 15 * 60000));
+  }
+};
+
+// Envoi immédiat quand l'app passe en arrière-plan : sur iPhone, la page est gelée
+// quelques secondes après, et la sauvegarde en attente était tout simplement perdue.
+Cloud.flush = function () {
+  if (!this.pending || !WORKER_URL || !this.pass || !navigator.onLine) return;
+  clearTimeout(this.timer);
+  this.envoyer();
+};
+document.addEventListener('visibilitychange', () => { if (document.hidden) Cloud.flush(); });
+window.addEventListener('pagehide', () => Cloud.flush());
+// Retour du réseau : on rattrape tout de suite au lieu d'attendre le prochain essai
+window.addEventListener('online', () => { if (Cloud.pending) { Cloud.essais = 0; Cloud.schedule(1500); } });
 
 // petit témoin discret dans la barre du haut
 function cloudBadge(etat) {
   const el = document.getElementById('cloud-state');
   if (!el) return;
-  const t = { 'en attente': '☁︎', 'envoi': '☁︎…', 'ok': '☁︎✓', 'erreur': '☁︎!' }[etat] || '';
+  const t = { 'en attente': '☁︎', 'envoi': '☁︎…', 'ok': '☁︎✓', 'erreur': '☁︎!', 'absent': '☁︎✕' }[etat] || '';
   el.textContent = t;
-  el.className = 'cloud-state ' + (etat === 'erreur' ? 'err' : etat === 'ok' ? 'ok' : 'wait');
+  el.className = 'cloud-state ' + (etat === 'erreur' || etat === 'absent' ? 'err' : etat === 'ok' ? 'ok' : 'wait');
   el.hidden = false;
+  el.title = etat === 'absent' ? 'Sauvegarde cloud non configurée' : (Cloud.derniereErreur || '');
+  el.onclick = () => {
+    if (etat === 'erreur' || etat === 'absent') { switchTab('settings'); settingsPage = 'data'; renderSettings(); }
+  };
   if (etat === 'ok') setTimeout(() => { el.hidden = true; }, 2500);
 }
 
@@ -512,7 +753,7 @@ async function agendaItems() {
     label: (students[l.studentId] ? students[l.studentId].name : (l.title || KINDS[l.kind || 'cours'].label))
   }));
   for (const e of gcalCache) {
-    if (!linked.has(e.id) && !ignores.has(e.id)) items.push({ date: e.start.dateTime, gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
+    if (!linked.has(e.id) && !ignores.has(e.id)) items.push({ date: gcDebut(e), gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
   }
   return items.sort((a, b) => new Date(a.date) - new Date(b.date));
 }
@@ -520,7 +761,7 @@ async function agendaItems() {
 function itemCard(it) {
   if (it.gcal) return `<div class="swipe"><button class="swipe-del ignorer" data-ignore="${it.gcal.id}">Ignorer</button>
       <div class="card tappable row swipe-item" data-gcal="${it.gcal.id}">
-      <div class="lesson-time">${fmtTime(it.date)}</div>
+      <div class="lesson-time">${gcJournee(it.gcal) ? 'journée' : fmtTime(it.date)}</div>
       <div class="grow"><div class="title">${esc(it.label)}</div>
       <div class="sub"><span class="gcal-dot">●</span> Google · toucher pour rattacher</div></div>
       <div class="chev">›</div></div></div>`;
@@ -566,6 +807,12 @@ async function renderAgenda() {
       <div class="sub">Passés mais pas encore confirmés : ils ne sont comptés ni en heures ni sur les forfaits.</div></div>`;
 
   if (GC.connected) {
+    // L'app ne disait rien quand l'autorisation Google avait expiré : elle affichait
+    // « Échec de la synchro » et l'agenda restait figé sans qu'on sache pourquoi.
+    if (GC.aReconnecter) html += `<div class="card accent">
+        <div class="title">⚠️ Autorisation Google expirée</div>
+        <div class="sub">Google a révoqué l’accès (cela arrive tous les 7 jours tant que l’application Google est en mode « Test »). Les événements affichés datent de la dernière synchro.</div>
+        <button class="btn" id="btn-gc-relink">Reconnecter Google Agenda</button></div>`;
     html += `<button class="btn secondary" id="btn-sync">🔄 Synchroniser Google Agenda</button>`;
     if (gPast.length) html += `<div class="card accent tappable" id="past-import" style="margin-top:12px">
         <div class="title">📥 ${gPast.length} événement${gPast.length > 1 ? 's' : ''} passé${gPast.length > 1 ? 's' : ''} à rattacher</div>
@@ -594,10 +841,11 @@ async function renderAgenda() {
 
   const sync = $('#btn-sync');
   if (sync) sync.onclick = async () => {
-    sync.textContent = 'Synchronisation…';
-    try { gcalCache = await GC.pullEvents(); toast('Agenda synchronisé ✓'); } catch (e) { toast('Échec de la synchro'); }
+    sync.disabled = true; sync.textContent = 'Synchronisation…';
+    await GC.synchroniser();
     renderAgenda();
   };
+  const relink = $('#btn-gc-relink'); if (relink) relink.onclick = () => GC.connect();
   activerGlissement(view);
   const conn = $('#btn-gc-connect'); if (conn) conn.onclick = () => GC.connect();
   const av = $('#a-valider');
@@ -784,7 +1032,7 @@ function sheetPastList(events) {
     ${events.slice().reverse().map(e => `<div class="swipe"><button class="swipe-del ignorer" data-ignore-p="${e.id}">Ignorer</button>
       <div class="card tappable row swipe-item" data-past="${e.id}">
       <div class="grow"><div class="title">${esc(e.summary || '(sans titre)')}</div>
-      <div class="sub">${fmtDate(e.start.dateTime)} · ${fmtTime(e.start.dateTime)}</div></div>
+      <div class="sub">${fmtDate(gcDebut(e))}${gcJournee(e) ? ' · journée' : ' · ' + fmtTime(gcDebut(e))}</div></div>
       <div class="chev">›</div></div></div>`).join('')}`);
   activerGlissement($('#sheet'));
   $('#sheet').querySelectorAll('[data-ignore-p]').forEach(b => b.onclick = async () => {
@@ -809,9 +1057,11 @@ function sheetPastList(events) {
 async function sheetImportGcal(ev) {
   const students = await DB.all('students');
   const { courseTypes } = await getConfig();
-  const start = new Date(ev.start.dateTime);
-  const end = ev.end && ev.end.dateTime ? new Date(ev.end.dateTime) : new Date(start.getTime() + 3600000);
-  const dur = Math.max(15, Math.round((end - start) / 60000));
+  const start = new Date(gcDebut(ev));
+  const fin = gcFin(ev);
+  // un événement « journée entière » n'a pas de durée exploitable : 1 h par défaut
+  const end = (!gcJournee(ev) && fin) ? new Date(fin) : new Date(start.getTime() + 3600000);
+  const dur = Math.min(600, Math.max(15, Math.round((end - start) / 60000)));
   const t = (ev.summary || '').toLowerCase();
   const guess = students.find(s => t.includes(s.name.toLowerCase().split(' ')[0]));
   const kindGuess = /rep|répét|repet/.test(t) ? 'repetition' : /concert|spectacle|scène/.test(t) ? 'concert' : 'cours';
@@ -819,7 +1069,7 @@ async function sheetImportGcal(ev) {
   openSheet(`
     <h3>Rattacher cet événement</h3>
     <div class="card"><div class="title">${esc(ev.summary || '(sans titre)')}</div>
-      <div class="sub">${fmtDate(start)} · ${fmtTime(start)} — ${dur} min</div></div>
+      <div class="sub">${fmtDate(start)} · ${gcJournee(ev) ? 'journée entière' : fmtTime(start)} — ${fmtHours(dur)}</div></div>
     <label class="field"><span>Nature</span>
       <select id="f-kind">${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${k === kindGuess ? 'selected' : ''}>${v.icon} ${v.label}</option>`).join('')}</select></label>
     <div id="student-box">
@@ -1045,8 +1295,8 @@ async function renderHours() {
   // les événements Google non rattachés ne sont comptés nulle part : on le signale
   const lies = new Set((await DB.all('lessons')).map(l => l.gcalEventId).filter(Boolean));
   const bornes = hoursRange === 'week' ? startWeek : hoursRange === 'month' ? startMonth : new Date(0);
-  const orphelins = gcalCache.filter(e => !lies.has(e.id)
-    && new Date(e.start.dateTime) <= now && new Date(e.start.dateTime) >= bornes);
+  const orphelins = gcalCache.filter(e => !lies.has(e.id) && !ignores.has(e.id)
+    && new Date(gcDebut(e)) <= now && new Date(gcDebut(e)) >= bornes);
   if (orphelins.length) html += `<div class="card accent tappable" id="orphelins">
       <div class="title">📥 ${orphelins.length} événement${orphelins.length > 1 ? 's' : ''} Google non rattaché${orphelins.length > 1 ? 's' : ''}</div>
       <div class="sub">Ces heures ne sont pas comptées. Toucher pour les rattacher (cours, répétition, concert…).</div></div>`;
@@ -1683,7 +1933,7 @@ async function renderSettings() {
   const cats = [
     ['profil', '🏷️', 'Profil & facturation', 'Coordonnées, monnaie, mentions'],
     ['tarifs', '💶', 'Cours, forfaits & encaissement', 'Types de cours, tarifs, qui encaisse'],
-    ['google', '📅', 'Google Agenda', GC.connected ? 'Connecté' : 'Non connecté'],
+    ['google', '📅', 'Google Agenda', GC.aReconnecter ? '⚠️ Autorisation expirée — reconnecter' : GC.connected ? 'Connecté' : 'Non connecté'],
     ['data', '☁️', 'Données & sauvegarde', Cloud.lastBackup ? 'Dernière sauvegarde : ' + new Date(Cloud.lastBackup).toLocaleString('fr-FR') : 'Sauvegarde cloud à configurer'],
     ['securite', '🔒', 'Sécurité', Lock.enabled ? 'Code actif' : 'Aucun code'],
     ['apropos', 'ℹ️', 'À propos', 'Version ' + APP_VERSION]
@@ -1743,10 +1993,16 @@ async function settingsTarifs() {
 // --- Google Agenda ---
 async function settingsGoogle() {
   view.innerHTML = settingsBack('Google Agenda') + `<div class="card">
-    ${GC.connected ? `<span class="badge ok">Connecté</span>
+    ${GC.connected ? `${GC.aReconnecter ? '<span class="badge warn">Autorisation expirée</span>' : '<span class="badge ok">Connecté</span>'}
         <div class="sub" style="margin-top:8px"><b>Lecture seule :</b> l\u2019app récupère les événements de Google Agenda mais n\u2019y écrit jamais. Rien n\u2019y est ajouté, modifié ni supprimé.</div>
+        ${GC.aReconnecter ? `<div class="sub" style="margin-top:8px">Google a révoqué l\u2019accès. Tant que le projet Google reste en mode « Test », l\u2019autorisation expire tous les 7 jours : publie l\u2019application dans la console Google pour ne plus avoir à reconnecter.</div>
+          <button class="btn" id="gc-on">Reconnecter Google Agenda</button>` : ''}
+        <div class="sub" style="margin-top:8px">${GC.derniereSync ? 'Dernière synchro : ' + new Date(GC.derniereSync).toLocaleString('fr-FR') + ' · ' + gcalCache.length + ' événement(s)' : 'Jamais synchronisé sur cet appareil'}</div>
         <label class="field" style="margin-top:12px"><span>Récupérer les événements depuis le</span>
-          <input type="date" id="gc-since" value="${localStorage.getItem('gc_since') || '2026-05-25'}"></label>
+          <input type="date" id="gc-since" value="${localStorage.getItem('gc_since') || GC_DEPUIS_DEFAUT}"></label>
+        <label class="switch"><input type="checkbox" id="gc-journees" ${localStorage.getItem('gc_journees') !== '0' ? 'checked' : ''}>
+          <span class="track"></span>
+          <span class="lbl">Événements sur la journée entière<small>Les afficher aussi dans l\u2019agenda</small></span></label>
         <button class="btn secondary" id="gc-resync">Resynchroniser maintenant</button>
         ${ignores.size ? `<div class="sub" style="margin-top:10px">${ignores.size} événement(s) ignoré(s).</div>
           <button class="btn ghost" id="gc-unignore">Réafficher les événements ignorés</button>` : ''}
@@ -1757,16 +2013,23 @@ async function settingsGoogle() {
     </div>`;
   bindBack();
   const on = $('#gc-on'); if (on) on.onclick = () => GC.connect();
-  const off = $('#gc-off'); if (off) off.onclick = () => { GC.disconnect(); renderSettings(); };
+  const off = $('#gc-off'); if (off) off.onclick = async () => {
+    if (!confirm('Déconnecter Google Agenda ?\n\nLes séances déjà rattachées sont conservées.')) return;
+    await GC.disconnect(); renderSettings();
+  };
+  const jrs = $('#gc-journees');
+  if (jrs) jrs.onchange = async e => {
+    localStorage.setItem('gc_journees', e.target.checked ? '1' : '0');
+    await GC.synchroniser(true); renderSettings();
+  };
   const since = $('#gc-since');
   if (since) since.onchange = e => { localStorage.setItem('gc_since', e.target.value); toast('Date enregistrée ✓'); };
   const unign = $('#gc-unignore');
   if (unign) unign.onclick = async () => { await reafficherIgnores(); toast('Événements réaffichés ✓'); renderSettings(); };
   const resync = $('#gc-resync');
   if (resync) resync.onclick = async () => {
-    resync.textContent = 'Synchronisation…';
-    try { gcalCache = await GC.pullEvents(); toast(gcalCache.length + ' événement(s) récupéré(s) ✓'); }
-    catch (e) { toast('Échec de la synchro'); }
+    resync.disabled = true; resync.textContent = 'Synchronisation…';
+    await GC.synchroniser();
     renderSettings();
   };
 }
@@ -1827,6 +2090,9 @@ async function settingsData() {
           <input id="cl-pass" type="password" value="${esc(Cloud.pass)}"></label>
         <div class="row"><div class="grow sub">${Cloud.lastBackup ? 'Dernière sauvegarde : ' + new Date(Cloud.lastBackup).toLocaleString('fr-FR') : 'Jamais sauvegardé'}</div>
           ${Cloud.pending ? '<span class="badge warn">en attente</span>' : Cloud.lastBackup ? '<span class="badge ok">à jour</span>' : ''}</div>
+        ${Cloud.derniereErreur ? `<div class="sub" style="color:var(--danger);margin-top:6px">⚠️ ${esc(Cloud.derniereErreur)}</div>` : ''}
+        ${!Cloud.pass ? `<div class="sub" style="margin-top:6px">⚠️ Aucune phrase secrète : <b>rien n\u2019est sauvegardé dans le cloud</b>.</div>` : ''}
+        ${Cloud.pass && Cloud.lastBackup && Date.now() - Cloud.lastBackup > 7 * 864e5 ? `<div class="sub" style="margin-top:6px">⚠️ Plus de 7 jours sans sauvegarde réussie.</div>` : ''}
         <button class="btn" id="cl-save">Sauvegarder maintenant</button>
         <button class="btn secondary" id="cl-restore">Restaurer depuis le cloud</button>`
       : `<div class="sub">Nécessite le Worker Cloudflare (WORKER_URL dans js/config.js).</div>`}
@@ -1862,12 +2128,15 @@ async function settingsData() {
     clSave.onclick = async () => {
       const p = $('#cl-pass').value.trim();
       if (p.length < 6) { toast('6 caractères minimum'); return; }
-      Cloud.pass = p; clSave.textContent = 'Sauvegarde…';
+      Cloud.pass = p; clSave.disabled = true; clSave.textContent = 'Sauvegarde…';
       const ok = await Cloud.backup(false);
-      if (!ok && await Cloud.localCount() >= 0) {
-        if (confirm('L\u2019envoi a été refusé ou a échoué.\n\nForcer l\u2019envoi de la base actuelle (écrase le cloud) ?')) await Cloud.backup(false, true);
+      if (ok) { Cloud.pending = false; Cloud.essais = 0; }
+      else if (Cloud.derniereErreur.startsWith('Envoi refusé') || Cloud.derniereErreur.startsWith('Base locale vide')) {
+        if (confirm(Cloud.derniereErreur + '.\n\nForcer l\u2019envoi de la base de cet appareil (écrase le cloud) ?')) {
+          if (await Cloud.backup(false, true)) { Cloud.pending = false; Cloud.essais = 0; }
+        }
       }
-      Cloud.pending = false; renderSettings();
+      renderSettings();
     };
     $('#cl-restore').onclick = async () => {
       const p = $('#cl-pass').value.trim();
@@ -1878,16 +2147,28 @@ async function settingsData() {
   const test = $('#cl-test');
   if (test) test.onclick = async () => {
     if (!WORKER_URL) { toast('WORKER_URL manquant dans js/config.js'); return; }
-    if (!Cloud.pass) { toast('Renseigne la phrase secrète'); return; }
-    test.textContent = 'Test en cours…';
+    test.disabled = true; test.textContent = 'Test en cours…';
+    const fini = m => { toast(m); test.disabled = false; test.textContent = 'Tester l\u2019accès au cloud'; };
+    // 1) le worker répond-il, et est-il complet ?
+    let sante = null;
     try {
-      const r = await fetch(WORKER_URL + '/backup', { headers: { 'X-Backup-Key': Cloud.pass } });
-      if (r.status === 404) toast('Connexion OK, mais aucune sauvegarde pour cette phrase');
-      else if (r.status === 401) toast('Phrase secrète refusée');
-      else if (r.ok) { const t = await r.text(); const d = JSON.parse(t); let n = 0; for (const k of Object.keys(d)) if (Array.isArray(d[k]) && k !== 'settings') n += d[k].length; toast('Connexion OK · ' + n + ' enregistrement(s) dans le cloud'); }
-      else toast('Réponse cloud : ' + r.status);
-    } catch (e) { toast('Connexion impossible (réseau/CORS)'); console.error(e); }
-    test.textContent = 'Tester l\u2019accès au cloud';
+      const h = await fetch(WORKER_URL + '/health');
+      if (h.ok) sante = await h.json();
+    } catch (e) { console.error('health', e); }
+    if (!sante) return fini('Worker injoignable — vérifie WORKER_URL, ou ALLOWED_ORIGIN côté worker');
+    if (!sante.kv) return fini('Worker OK, mais le stockage KV (binding BACKUPS) manque');
+    if (sante.origines.length && !sante.origines.includes(location.origin))
+      return fini('ALLOWED_ORIGIN du worker ne contient pas ' + location.origin);
+    if (!Cloud.pass) return fini('Worker OK · renseigne maintenant la phrase secrète');
+    // 2) la phrase secrète donne-t-elle bien accès à une sauvegarde ?
+    try {
+      const r = await fetch(WORKER_URL + '/backup?meta=1', { headers: { 'X-Backup-Key': Cloud.pass } });
+      if (r.status === 401) return fini('Phrase secrète refusée (6 caractères min.)');
+      if (!r.ok) return fini('Réponse cloud : ' + r.status);
+      const m = await r.json();
+      if (m.vide) return fini('Connexion OK, mais aucune sauvegarde pour cette phrase');
+      fini('Connexion OK · ' + m.count + ' enregistrement(s), le ' + new Date(m.date).toLocaleString('fr-FR'));
+    } catch (e) { console.error(e); fini('Connexion impossible (réseau / CORS)'); }
   };
   const check = $('#cl-check');
   if (check) check.onclick = async () => {
@@ -1911,7 +2192,7 @@ async function settingsData() {
   $('#bk-import').onclick = () => $('#bk-file').click();
   $('#bk-file').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
-    try { await DB.importAll(JSON.parse(await f.text())); toast('Restauré ✓'); renderSettings(); }
+    try { await DB.importAll(JSON.parse(await f.text())); localStorage.removeItem('cloud_sig'); toast('Restauré ✓'); renderSettings(); }
     catch (err) { toast('Fichier invalide'); }
   };
 }
@@ -2102,8 +2383,13 @@ function sheetSetCode() {
 // ====== Démarrage ======
 (async function start() {
   $('#splash-version').textContent = 'v' + APP_VERSION;
+  // Les identifiants d'abord : sans eux la synchro Google et le cloud restent muets.
+  await Creds.charger();
   CURRENCY = await DB.getSetting('currency', 'XPF');
   await chargerIgnores();
+  // Événements Google de la dernière synchro : l'agenda est complet dès l'ouverture,
+  // même hors ligne (avant, il fallait attendre le réseau et tout était vide sans lui).
+  gcalCache = await GC.chargerCache();
   GC.handleCallback();
   Lock.init();
   $('#topbar-undo').onclick = () => Undo.annuler();
@@ -2122,8 +2408,13 @@ function sheetSetCode() {
   }, 2600);
 
   if (GC.connected) {
-    GC.pullEvents()
-      .then(ev => { gcalCache = ev; if (currentTab === 'agenda') renderAgenda(); })
-      .catch(() => { });
+    GC.synchroniser(true).then(() => { if (currentTab === 'agenda' || currentTab === 'hours') refreshView(); });
   }
+
+  // Retour au premier plan : on rafraîchit l'agenda Google au plus une fois par heure
+  document.addEventListener('visibilitychange', async () => {
+    if (document.hidden || !GC.connected) return;
+    if (Date.now() - GC.derniereSync < 3600 * 1000) return;
+    if (await GC.synchroniser(true)) { if (currentTab === 'agenda' || currentTab === 'hours') refreshView(); }
+  });
 })();

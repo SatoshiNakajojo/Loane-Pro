@@ -3,8 +3,13 @@ main = "worker.js"
 compatibility_date = "2026-01-01"
 
 [vars]
-# Remplace par l'URL exacte de ton site GitHub Pages (sans / final)
+# Origine(s) autorisée(s) à appeler le worker. Plusieurs valeurs possibles,
+# séparées par des virgules. Un / final ou une URL complète sont tolérés.
 ALLOWED_ORIGIN = "https://TON-COMPTE.github.io"
+
+# Facultatif — l'app ne fait que LIRE l'agenda. Décommente pour ne demander à Google
+# qu'une autorisation en lecture seule (nécessite une reconnexion depuis l'app).
+# GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
 
 # Stockage des sauvegardes cloud.
 # En ligne de commande : npx wrangler kv namespace create BACKUPS

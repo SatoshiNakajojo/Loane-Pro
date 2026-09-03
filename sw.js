@@ -1,7 +1,7 @@
 // Service worker — Loane Pro
 // Stratégie "réseau d'abord" : l'app se met à jour dès qu'il y a du réseau,
 // et reste utilisable hors ligne grâce au cache.
-const CACHE = 'loane-pro-3.8.0';
+const CACHE = 'loane-pro-3.8.1';
 const ASSETS = [
   './', './index.html', './css/app.css',
   './js/config.js', './js/db.js', './js/app.js',
@@ -11,7 +11,10 @@ const ASSETS = [
 ];
 
 self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+  // addAll échoue en bloc si un seul fichier manque : on précharge fichier par fichier
+  e.waitUntil(caches.open(CACHE).then(c =>
+    Promise.all(ASSETS.map(a => c.add(a).catch(err => console.warn('précache', a, err))))
+  ));
   self.skipWaiting();
 });
 
@@ -28,10 +31,20 @@ self.addEventListener('fetch', e => {
   e.respondWith(
     fetch(e.request)
       .then(res => {
-        const clone = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, clone));
+        // On ne met en cache QUE les réponses valides : une erreur 404/500 servie
+        // pendant un déploiement restait sinon en cache et cassait l'app hors ligne.
+        if (res && res.ok && res.type === 'basic') {
+          const clone = res.clone();
+          caches.open(CACHE).then(c => c.put(e.request, clone)).catch(() => { });
+        }
         return res;
       })
-      .catch(() => caches.match(e.request).then(hit => hit || caches.match('./index.html')))
+      .catch(() => caches.match(e.request).then(hit => {
+        if (hit) return hit;
+        // Repli sur la page d'accueil uniquement pour une navigation : renvoyer du HTML
+        // à la place d'un .css ou d'une image ne faisait qu'ajouter des erreurs.
+        if (e.request.mode === 'navigate') return caches.match('./index.html');
+        return Response.error();
+      }))
   );
 });

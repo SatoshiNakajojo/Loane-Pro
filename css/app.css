@@ -148,6 +148,7 @@ body.locked .topbar,body.locked main,body.locked .tabbar{filter:blur(18px)}
 }
 .cloud-state.ok{background:var(--green-soft);color:var(--green-bright)}
 .cloud-state.err{background:var(--danger-soft);color:var(--danger)}
+.cloud-state.err{cursor:pointer}
 
 /* ===== Contenu ===== */
 main{padding:20px 16px calc(96px + var(--safe-b));max-width:600px;margin:0 auto}

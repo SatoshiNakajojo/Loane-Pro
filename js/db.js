@@ -1,7 +1,13 @@
 // ====== Base de données locale (IndexedDB) ======
 const DB = (() => {
-  const NAME = 'studio-vocal', VERSION = 1;
+  const NAME = 'studio-vocal', VERSION = 2;
+  // Magasins sauvegardés / exportés
   const STORES = ['students', 'lessons', 'payments', 'notes', 'invoices', 'library', 'settings'];
+  // Magasin purement local : jetons Google, phrase secrète, cache de l'agenda Google.
+  // Il n'est JAMAIS exporté ni envoyé dans le cloud (sinon le fichier de sauvegarde
+  // contiendrait les identifiants), mais il survit au nettoyage de localStorage par iOS.
+  const LOCAL = 'local';
+  const TOUS = [...STORES, LOCAL];
   let dbp = null;
 
   function open() {
@@ -10,7 +16,7 @@ const DB = (() => {
       const req = indexedDB.open(NAME, VERSION);
       req.onupgradeneeded = e => {
         const db = e.target.result;
-        for (const s of STORES) {
+        for (const s of TOUS) {
           if (!db.objectStoreNames.contains(s)) {
             const st = db.createObjectStore(s, { keyPath: 'id' });
             if (['lessons', 'payments', 'notes'].includes(s)) st.createIndex('studentId', 'studentId');
@@ -60,6 +66,15 @@ const DB = (() => {
       });
     },
     async del(store, id) { return tx(store, 'readwrite', s => s.delete(id)); },
+    // valeurs locales (jamais exportées) : identifiants, cache Google
+    async getLocal(key, fallback) {
+      try { const row = await this.get(LOCAL, key); return row ? row.value : fallback; }
+      catch (e) { return fallback; }
+    },
+    async setLocal(key, value) {
+      try { await tx(LOCAL, 'readwrite', s => s.put({ id: key, value })); } catch (e) { }
+    },
+    async delLocal(key) { try { await tx(LOCAL, 'readwrite', s => s.delete(key)); } catch (e) { } },
     // réglages clé/valeur
     async getSetting(key, fallback) {
       const row = await this.get('settings', key);
