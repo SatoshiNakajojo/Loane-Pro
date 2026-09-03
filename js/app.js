@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.8.1';
+const APP_VERSION = '3.8.2';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -329,6 +329,72 @@ const GC = {
     const c = await DB.getLocal('gc_cache', null);
     if (c && Array.isArray(c.events)) { this.derniereSync = c.date || 0; return c.events; }
     return [];
+  },
+
+  // Vérifie la chaîne complète, étape par étape, et dit laquelle casse.
+  async diagnostic() {
+    const etapes = [];
+    const ajout = (nom, ok, detail) => etapes.push({ nom, ok, detail: detail || '' });
+
+    if (!WORKER_URL) { ajout('Adresse du worker', false, 'WORKER_URL vide dans js/config.js'); return etapes; }
+    ajout('Adresse du worker', true, WORKER_URL);
+
+    // 1) le worker répond-il, et est-il complet ?
+    let sante = null, statutSante = '', repond = false;
+    try {
+      const r = await fetch(WORKER_URL + '/health');
+      repond = true;
+      statutSante = 'HTTP ' + r.status;
+      if (r.ok) sante = await r.json().catch(() => null);
+    } catch (e) { statutSante = 'requête bloquée — worker injoignable, adresse erronée, ou pas de réseau'; }
+
+    if (!sante) {
+      // Le worker qui répond sans /health est l'ancienne version, encore déployée.
+      ajout('Worker joignable', repond, repond ? statutSante : statutSante);
+      ajout('Code du worker à jour', false, repond
+        ? 'Le worker répond mais ne connaît pas /health : c\u2019est l\u2019ancienne version. Recolle worker/worker.js dans Cloudflare → Deploy.'
+        : 'Impossible de le vérifier tant que le worker ne répond pas.');
+    } else {
+      ajout('Worker joignable', true, 'code à jour');
+      ajout('Identifiants Google configurés', !!sante.google, sante.google ? '' : 'GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET manquants sur le worker');
+      const origineOk = !sante.origines.length || sante.origines.includes(location.origin);
+      ajout('ALLOWED_ORIGIN du worker', origineOk,
+        origineOk ? (sante.origines.join(', ') || 'aucune (tout autorisé)')
+          : 'le worker autorise ' + (sante.origines.join(', ') || '—') + ' mais l\u2019app est sur ' + location.origin);
+    }
+
+    // 2) autorisation Google
+    const rt = localStorage.getItem('gc_refresh');
+    ajout('Compte Google connecté', !!rt, rt ? '' : 'jamais connecté, ou autorisation effacée par iOS');
+    if (!rt) return etapes;
+
+    let jeton = null;
+    try {
+      const r = await fetch(WORKER_URL + '/auth/refresh', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: rt })
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && d.access_token) { jeton = d.access_token; ajout('Autorisation Google valide', true); }
+      else ajout('Autorisation Google valide', false,
+        'HTTP ' + r.status + (d.error ? ' · ' + d.error : '') + (r.status === 401 ? ' — reconnecte le compte Google' : ''));
+    } catch (e) { ajout('Autorisation Google valide', false, 'requête bloquée (CORS : ALLOWED_ORIGIN ?)'); }
+    if (!jeton) return etapes;
+
+    // 3) l'API Agenda répond-elle ?
+    try {
+      const r = await fetch('https://www.googleapis.com/calendar/v3/calendars/primary/events?maxResults=1',
+        { headers: { Authorization: 'Bearer ' + jeton } });
+      if (r.ok) ajout('Lecture de l\u2019agenda', true);
+      else {
+        const d = await r.json().catch(() => ({}));
+        const m = d.error && d.error.message ? d.error.message : '';
+        ajout('Lecture de l\u2019agenda', false, 'HTTP ' + r.status + (m ? ' · ' + m : '')
+          + (r.status === 403 ? ' — API Google Calendar non activée, ou portée insuffisante' : ''));
+      }
+    } catch (e) { ajout('Lecture de l\u2019agenda', false, 'requête bloquée'); }
+
+    return etapes;
   },
 
   // Synchro complète avec message d'erreur explicite (au lieu de « Échec de la synchro »)
@@ -2004,11 +2070,15 @@ async function settingsGoogle() {
           <span class="track"></span>
           <span class="lbl">Événements sur la journée entière<small>Les afficher aussi dans l\u2019agenda</small></span></label>
         <button class="btn secondary" id="gc-resync">Resynchroniser maintenant</button>
+        <button class="btn ghost" id="gc-diag">🔍 Diagnostic de la synchro</button>
+        <div id="gc-diag-res"></div>
         ${ignores.size ? `<div class="sub" style="margin-top:10px">${ignores.size} événement(s) ignoré(s).</div>
           <button class="btn ghost" id="gc-unignore">Réafficher les événements ignorés</button>` : ''}
         <button class="btn danger" id="gc-off">Déconnecter</button>`
       : WORKER_URL ? `<div class="sub">Connecte le compte Google pour récupérer les événements.</div>
-        <button class="btn" id="gc-on">Connecter Google Agenda</button>`
+        <button class="btn" id="gc-on">Connecter Google Agenda</button>
+        <button class="btn ghost" id="gc-diag">🔍 Diagnostic de la synchro</button>
+        <div id="gc-diag-res"></div>`
         : `<div class="sub">Renseigne WORKER_URL dans js/config.js.</div>`}
     </div>`;
   bindBack();
@@ -2026,6 +2096,18 @@ async function settingsGoogle() {
   if (since) since.onchange = e => { localStorage.setItem('gc_since', e.target.value); toast('Date enregistrée ✓'); };
   const unign = $('#gc-unignore');
   if (unign) unign.onclick = async () => { await reafficherIgnores(); toast('Événements réaffichés ✓'); renderSettings(); };
+  const diag = $('#gc-diag');
+  if (diag) diag.onclick = async () => {
+    diag.disabled = true; diag.textContent = 'Analyse…';
+    const etapes = await GC.diagnostic();
+    $('#gc-diag-res').innerHTML = `<div class="card" style="margin-top:10px">`
+      + etapes.map(e => `<div style="margin-bottom:8px">
+          <div class="title">${e.ok ? '✅' : '❌'} ${esc(e.nom)}</div>
+          ${e.detail ? `<div class="sub">${esc(e.detail)}</div>` : ''}</div>`).join('')
+      + `<div class="sub" style="margin-top:10px">La première ligne ❌ est la cause : c\u2019est celle-là qu\u2019il faut corriger.</div></div>`;
+    diag.disabled = false; diag.textContent = '🔍 Diagnostic de la synchro';
+  };
+
   const resync = $('#gc-resync');
   if (resync) resync.onclick = async () => {
     resync.disabled = true; resync.textContent = 'Synchronisation…';
@@ -2381,8 +2463,23 @@ function sheetSetCode() {
 }
 
 // ====== Démarrage ======
+function ecranPanne(msg, detail) {
+  const sp = document.getElementById('splash'); if (sp) sp.remove();
+  document.getElementById('view').innerHTML = `<div class="card accent" style="margin-top:20px">
+      <div class="title">${msg}</div><div class="sub">${detail}</div></div>`;
+}
+
 (async function start() {
   $('#splash-version').textContent = 'v' + APP_VERSION;
+  // Si la base ne s'ouvre pas, mieux vaut le dire que rester bloqué sur l'écran de lancement.
+  try { await DB.all('settings'); }
+  catch (e) {
+    console.error('ouverture base', e);
+    return ecranPanne('Base de données inaccessible',
+      e && e.message === 'base_bloquee'
+        ? 'L\u2019app est ouverte dans une autre fenêtre ou un autre onglet. Ferme-les toutes, puis rouvre l\u2019app.'
+        : 'Le navigateur refuse l\u2019accès au stockage (navigation privée ?).');
+  }
   // Les identifiants d'abord : sans eux la synchro Google et le cloud restent muets.
   await Creds.charger();
   CURRENCY = await DB.getSetting('currency', 'XPF');

@@ -36,7 +36,17 @@
 [hidden]{display:none !important}
 
 /* le fond de l'app = l'écran de lancement */
-html{min-height:100%;background:var(--scene);background-attachment:fixed}
+/* La couleur pleine est indispensable : le dégradé --scene est une image de fond en
+   background-attachment:fixed, et iOS ne la peint pas toujours jusqu'au bas de l'écran
+   (zone du home indicator, sous la barre d'onglets qui est translucide). Sans couleur
+   de fond, ces zones retombaient sur le blanc par défaut du navigateur. */
+html{
+  min-height:100%;
+  background-color:var(--bg-0);
+  background-image:var(--scene);
+  background-attachment:fixed;
+  background-repeat:no-repeat;
+}
 body{
   min-height:100dvh;font-family:var(--body);color:var(--ink);
   font-size:16px;line-height:1.5;font-weight:300;

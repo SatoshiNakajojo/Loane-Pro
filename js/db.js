@@ -23,8 +23,21 @@ const DB = (() => {
           }
         }
       };
-      req.onsuccess = () => res(req.result);
-      req.onerror = () => rej(req.error);
+      req.onsuccess = () => {
+        const db = req.result;
+        // Une autre fenêtre veut mettre la base à niveau : on libère la connexion,
+        // sinon c'est elle qui resterait bloquée.
+        db.onversionchange = () => { db.close(); dbp = null; };
+        res(db);
+      };
+      req.onerror = () => { dbp = null; rej(req.error); };
+      // Mise à niveau impossible car l'app est ouverte ailleurs (autre onglet Safari,
+      // ou l'app installée en parallèle). Sans ce cas, ni onsuccess ni onerror ne se
+      // déclenchaient : la promesse restait en attente et toute l'app se figeait.
+      req.onblocked = () => {
+        dbp = null;
+        rej(new Error('base_bloquee'));
+      };
     });
     return dbp;
   }
