@@ -479,8 +479,16 @@ const Cloud = {
       if (!silent) toast('Sauvegardé dans le cloud ✓');
       return true;
     } catch (e) {
-      this.derniereErreur = navigator.onLine ? 'Cloud injoignable (worker / CORS ?)' : 'Hors ligne';
       console.error('sauvegarde cloud', e);
+      if (!navigator.onLine) this.derniereErreur = 'Hors ligne';
+      else if (force) {
+        // L'ancien worker n'autorise pas l'en-tête X-Force : le navigateur bloque
+        // la requête avant même de l'envoyer. Rien à voir avec la phrase secrète.
+        const w = await this.sonderWorker();
+        this.derniereErreur = w.ajour
+          ? 'Cloud injoignable (worker / CORS ?)'
+          : 'Forçage impossible : le worker Cloudflare doit être mis à jour (en-tête X-Force refusé)';
+      } else this.derniereErreur = 'Cloud injoignable (worker / CORS ?)';
       if (!silent) toast(this.derniereErreur);
       return false;
     }
@@ -502,14 +510,40 @@ const Cloud = {
     } catch (e) { return []; }
   },
 
+  // L'ancienne version du worker ne connaît ni /health, ni ?meta=1, ni l'en-tête
+  // X-Force. Tant qu'elle n'est pas remplacée, l'app doit fonctionner quand même :
+  // on sonde une fois pour savoir à quoi on parle.
+  _worker: null,
+  async sonderWorker(refaire) {
+    if (this._worker && !refaire) return this._worker;
+    if (!WORKER_URL) return (this._worker = { joignable: false, ajour: false, raison: 'WORKER_URL vide' });
+    try {
+      const r = await fetch(WORKER_URL + '/health');
+      if (!r.ok) return (this._worker = { joignable: true, ajour: false, raison: 'HTTP ' + r.status });
+      const j = await r.json().catch(() => null);
+      this._worker = (j && j.ok)
+        ? { joignable: true, ajour: true, kv: !!j.kv, google: !!j.google, origines: j.origines || [] }
+        : { joignable: true, ajour: false, raison: 'réponse inattendue' };
+    } catch (e) {
+      this._worker = { joignable: false, ajour: false, raison: 'requête bloquée (réseau ou CORS)' };
+    }
+    return this._worker;
+  },
+
   // Date/volume de la dernière sauvegarde sans télécharger tout le contenu
   async meta() {
     if (!WORKER_URL || !this.pass) return null;
     try {
       const r = await fetch(WORKER_URL + '/backup?meta=1', { headers: { 'X-Backup-Key': this.pass } });
       if (!r.ok) return null;
-      const m = await r.json();
-      return m && m.vide ? null : m;
+      const m = await r.json().catch(() => null);
+      if (!m || m.vide) return null;
+      if (typeof m.count === 'number' && m.date) return m;
+      // Ancien worker : il ignore ?meta=1 et renvoie la sauvegarde entière.
+      // On en tire quand même le nombre d'enregistrements.
+      let n = 0;
+      for (const k of Object.keys(m)) if (Array.isArray(m[k]) && k !== 'settings') n += m[k].length;
+      return { count: n, date: null, ancien: true };
     } catch (e) { return null; }
   },
 
@@ -2187,6 +2221,7 @@ async function settingsData() {
         ${lignes}
       </table>
     </div>
+    <div id="worker-etat"></div>
     <button class="btn secondary" id="cl-check">🔍 Comparer avec le cloud</button>
     <button class="btn ghost" id="cl-test">Tester l\u2019accès au cloud</button>
     ${cloudSnapshot ? '<div class="sub" style="text-align:center;margin-top:6px">Comparaison faite à l\u2019instant.</div>' : ''}
@@ -2204,6 +2239,7 @@ async function settingsData() {
 
   view.querySelectorAll('[data-store]').forEach(tr => tr.onclick = () => sheetStoreList(tr.dataset.store));
   dessineHistorique();
+  etatWorker();
 
   const clSave = $('#cl-save');
   if (clSave) {
@@ -2231,25 +2267,27 @@ async function settingsData() {
     if (!WORKER_URL) { toast('WORKER_URL manquant dans js/config.js'); return; }
     test.disabled = true; test.textContent = 'Test en cours…';
     const fini = m => { toast(m); test.disabled = false; test.textContent = 'Tester l\u2019accès au cloud'; };
-    // 1) le worker répond-il, et est-il complet ?
-    let sante = null;
-    try {
-      const h = await fetch(WORKER_URL + '/health');
-      if (h.ok) sante = await h.json();
-    } catch (e) { console.error('health', e); }
-    if (!sante) return fini('Worker injoignable — vérifie WORKER_URL, ou ALLOWED_ORIGIN côté worker');
-    if (!sante.kv) return fini('Worker OK, mais le stockage KV (binding BACKUPS) manque');
-    if (sante.origines.length && !sante.origines.includes(location.origin))
-      return fini('ALLOWED_ORIGIN du worker ne contient pas ' + location.origin);
-    if (!Cloud.pass) return fini('Worker OK · renseigne maintenant la phrase secrète');
+    // 1) le worker répond-il, et dans quelle version ?
+    const w = await Cloud.sonderWorker(true);
+    if (!w.joignable) return fini('Worker injoignable (' + w.raison + ') — vérifie WORKER_URL et ALLOWED_ORIGIN');
+    if (w.ajour) {
+      if (!w.kv) return fini('Worker OK, mais le stockage KV (binding BACKUPS) manque');
+      if (w.origines.length && !w.origines.includes(location.origin))
+        return fini('ALLOWED_ORIGIN du worker ne contient pas ' + location.origin);
+    }
+    if (!Cloud.pass) return fini('Worker joignable · renseigne maintenant la phrase secrète');
     // 2) la phrase secrète donne-t-elle bien accès à une sauvegarde ?
     try {
       const r = await fetch(WORKER_URL + '/backup?meta=1', { headers: { 'X-Backup-Key': Cloud.pass } });
       if (r.status === 401) return fini('Phrase secrète refusée (6 caractères min.)');
+      if (r.status === 404) return fini('Connexion OK, mais aucune sauvegarde pour cette phrase');
+      if (r.status === 501) return fini('Stockage KV (binding BACKUPS) absent du worker');
       if (!r.ok) return fini('Réponse cloud : ' + r.status);
-      const m = await r.json();
-      if (m.vide) return fini('Connexion OK, mais aucune sauvegarde pour cette phrase');
-      fini('Connexion OK · ' + m.count + ' enregistrement(s), le ' + new Date(m.date).toLocaleString('fr-FR'));
+      const m = await Cloud.meta();
+      if (!m) return fini('Connexion OK, mais aucune sauvegarde pour cette phrase');
+      fini('Connexion OK · ' + m.count + ' enregistrement(s)'
+        + (m.date ? ', le ' + new Date(m.date).toLocaleString('fr-FR') : '')
+        + (w.ajour ? '' : ' · worker en ancienne version'));
     } catch (e) { console.error(e); fini('Connexion impossible (réseau / CORS)'); }
   };
   const check = $('#cl-check');
@@ -2277,6 +2315,18 @@ async function settingsData() {
     try { await DB.importAll(JSON.parse(await f.text())); localStorage.removeItem('cloud_sig'); toast('Restauré ✓'); renderSettings(); }
     catch (err) { toast('Fichier invalide'); }
   };
+}
+
+// Signale une ancienne version du worker : la sauvegarde marche, mais le forçage
+// et l'historique daté ne sont pas disponibles tant qu'il n'est pas remplacé.
+async function etatWorker() {
+  const box = $('#worker-etat'); if (!box || !WORKER_URL) return;
+  const w = await Cloud.sonderWorker();
+  if (w.ajour) { box.innerHTML = ''; return; }
+  box.innerHTML = `<div class="card"><div class="title">${w.joignable ? '⚠️ Worker en ancienne version' : '⛔ Worker injoignable'}</div>
+      <div class="sub">${w.joignable
+        ? 'Les sauvegardes fonctionnent. Pour retrouver le forçage d\u2019envoi et l\u2019historique daté, recolle <b>worker/worker.js</b> dans Cloudflare → <b>Deploy</b>.'
+        : esc(w.raison || '') + ' — vérifie WORKER_URL dans js/config.js et ALLOWED_ORIGIN côté worker.'}</div></div>`;
 }
 
 // Les 6 dernières versions conservées dans le cloud
