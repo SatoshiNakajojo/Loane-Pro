@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.8.3';
+const APP_VERSION = '3.8.4';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -2122,6 +2122,8 @@ async function settingsGoogle() {
           <span class="track"></span>
           <span class="lbl">Événements sur la journée entière<small>Les afficher aussi dans l\u2019agenda</small></span></label>
         <button class="btn secondary" id="gc-resync">Resynchroniser maintenant</button>
+        ${GC.aReconnecter ? '' : `<button class="btn secondary" id="gc-reconnect">🔁 Reconnecter le compte Google</button>
+          <div class="sub" style="margin-top:-4px">À faire après avoir publié l\u2019application dans la console Google : le jeton actuel garde sinon la limite de 7 jours du mode « Test ».</div>`}
         <button class="btn ghost" id="gc-diag">🔍 Diagnostic de la synchro</button>
         <div id="gc-diag-res"></div>
         ${ignores.size ? `<div class="sub" style="margin-top:10px">${ignores.size} événement(s) ignoré(s).</div>
@@ -2135,6 +2137,9 @@ async function settingsGoogle() {
     </div>`;
   bindBack();
   const on = $('#gc-on'); if (on) on.onclick = () => GC.connect();
+  // Reconnexion volontaire : Google redemande le consentement et renvoie un jeton
+  // neuf, qui remplace l'ancien. Inutile de se déconnecter d'abord.
+  const re = $('#gc-reconnect'); if (re) re.onclick = () => GC.connect();
   const off = $('#gc-off'); if (off) off.onclick = async () => {
     if (!confirm('Déconnecter Google Agenda ?\n\nLes séances déjà rattachées sont conservées.')) return;
     await GC.disconnect(); renderSettings();
