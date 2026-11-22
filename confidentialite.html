@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Règles de confidentialité — Loane Pro</title>
+<meta name="description" content="Règles de confidentialité de l’application Loane Pro : données stockées sur l’appareil, accès en lecture seule à Google Agenda, sauvegarde cloud facultative.">
+<meta name="theme-color" content="#0C1A12">
+<link rel="apple-touch-icon" href="icons/icon-180-v5.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600&family=Jost:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg-0:#0C1A12;
+  --green-glass:rgba(38,110,74,.28);
+  --green-bright:#3FB27A;
+  --gold:#E3BE72;
+  --ink:#F3EFE4;
+  --ink-soft:#AFBCB2;
+  --line:rgba(227,190,114,.16);
+  --danger:#E4795F;
+  --display:"Playfair Display","Iowan Old Style",Georgia,serif;
+  --body:"Jost",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  --scene:
+    radial-gradient(ellipse 90% 55% at 12% 8%, rgba(240,145,48,.34), transparent 66%),
+    radial-gradient(ellipse 95% 60% at 90% 94%, rgba(30,150,95,.32), transparent 66%),
+    linear-gradient(160deg,#2A1A0C 0%,#14251A 46%,#0C1A12 100%);
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{
+  min-height:100%;
+  background-color:var(--bg-0);
+  background-image:var(--scene);
+  background-attachment:fixed;
+  background-repeat:no-repeat;
+}
+body{
+  font-family:var(--body);font-weight:300;font-size:16px;line-height:1.65;
+  color:var(--ink);-webkit-font-smoothing:antialiased;
+  padding:32px 18px 72px;
+}
+.wrap{max-width:720px;margin:0 auto}
+header{text-align:center;margin-bottom:34px}
+header img{width:64px;height:auto;display:block;margin:0 auto 14px}
+h1{font-family:var(--display);font-weight:600;font-size:1.72rem;letter-spacing:.02em;line-height:1.25}
+.maj{color:var(--ink-soft);font-size:.86rem;margin-top:8px}
+.card{
+  background:var(--green-glass);border:1px solid var(--line);border-radius:18px;
+  padding:20px 22px;margin-bottom:14px;
+}
+h2{
+  font-family:var(--display);font-weight:500;font-size:1.16rem;color:var(--gold);
+  letter-spacing:.02em;margin-bottom:10px;
+}
+p+p,ul+p,p+ul{margin-top:11px}
+ul{margin:11px 0 0 2px;padding-left:18px}
+li{margin-bottom:7px}
+li::marker{color:var(--gold)}
+strong{font-weight:500;color:#fff}
+a{color:var(--green-bright);text-decoration:none;border-bottom:1px solid rgba(63,178,122,.4)}
+a:hover{border-bottom-color:var(--green-bright)}
+.alerte{border-color:rgba(228,121,95,.34);background:rgba(228,121,95,.1)}
+.alerte h2{color:var(--danger)}
+code{
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:.86em;
+  background:rgba(0,0,0,.28);padding:1px 6px;border-radius:5px;
+}
+footer{text-align:center;color:var(--ink-soft);font-size:.82rem;margin-top:26px;line-height:1.8}
+@media (max-width:480px){
+  body{padding:24px 14px 56px}
+  h1{font-size:1.44rem}
+  .card{padding:17px 16px;border-radius:15px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <img src="icons/bird.png" alt="">
+  <h1>Règles de confidentialité</h1>
+  <div class="maj">Application <strong>Loane Pro</strong> · dernière mise à jour le 22 novembre 2026</div>
+</header>
+
+<div class="card">
+  <h2>1. Ce qu’est Loane Pro</h2>
+  <p>Loane Pro est une application web installable (PWA) à usage professionnel, conçue pour une
+  professeure de chant : agenda des cours, fiches élèves, suivi des heures effectuées et des
+  paiements, factures et devis, répertoire de morceaux.</p>
+  <p>Elle s’utilise depuis un navigateur ou depuis l’icône installée sur l’écran d’accueil du
+  téléphone. Elle ne comporte ni compte utilisateur, ni inscription, ni espace partagé.</p>
+</div>
+
+<div class="card">
+  <h2>2. Où sont vos données</h2>
+  <p>Tout ce que vous saisissez — élèves, séances, paiements, notes de cours, factures, devis,
+  morceaux et pièces jointes — est enregistré <strong>sur votre appareil</strong>, dans le stockage
+  local du navigateur (IndexedDB).</p>
+  <p>Ces données ne transitent par aucun serveur tant que vous n’activez pas vous-même la
+  sauvegarde cloud décrite à la section 5. Par défaut, elle est désactivée.</p>
+</div>
+
+<div class="card">
+  <h2>3. Accès à Google Agenda</h2>
+  <p>Si vous connectez un compte Google, l’application lit votre agenda pour afficher vos
+  rendez-vous à côté de vos cours. Cet accès est strictement encadré :</p>
+  <ul>
+    <li><strong>Lecture seule.</strong> L’application n’ajoute, ne modifie et ne supprime jamais
+    quoi que ce soit dans Google Agenda.</li>
+    <li>Seul le <strong>calendrier principal</strong> du compte connecté est lu.</li>
+    <li>La lecture porte sur la période que vous choisissez dans les réglages, et jusqu’à douze
+    mois à venir.</li>
+    <li>Les événements récupérés sont conservés <strong>sur votre appareil</strong>, afin que
+    l’agenda reste consultable hors ligne. Ils ne sont pas inclus dans la sauvegarde cloud.</li>
+    <li>Si vous rattachez manuellement un événement à une séance, son titre, sa date et sa
+    description deviennent des données de l’application et suivent alors les règles de la
+    section 5.</li>
+    <li>Les jetons d’accès Google sont conservés sur votre appareil. Aucune donnée d’agenda n’est
+    transmise à un tiers, utilisée à des fins publicitaires, ni employée pour entraîner un
+    modèle d’intelligence artificielle.</li>
+  </ul>
+  <p>Vous pouvez révoquer cet accès à tout moment, depuis
+  <strong>Réglages → Google Agenda → Déconnecter</strong> dans l’application, ou depuis
+  <a href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">la page des
+  autorisations de votre compte Google</a>.</p>
+  <p>L’utilisation et le transfert des informations reçues des API Google par cette application
+  respectent la
+  <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener">Google
+  API Services User Data Policy</a>, y compris ses exigences d’utilisation limitée
+  (<em>Limited Use</em>).</p>
+</div>
+
+<div class="card">
+  <h2>4. Le service intermédiaire</h2>
+  <p>Un petit service hébergé sur Cloudflare Workers accompagne l’application. Il sert uniquement à :</p>
+  <ul>
+    <li>détenir le « secret client » fourni par Google, qui ne doit jamais se trouver dans une page web ;</li>
+    <li>échanger et renouveler les jetons d’accès Google ;</li>
+    <li>héberger la sauvegarde cloud, si vous l’activez.</li>
+  </ul>
+  <p>Ce service ne conserve aucun jeton Google, ne lit jamais le contenu de votre agenda et
+  n’enregistre aucun journal du contenu qui y transite.</p>
+</div>
+
+<div class="card alerte">
+  <h2>5. Sauvegarde cloud — facultative</h2>
+  <p>Si, et seulement si, vous renseignez une phrase secrète dans
+  <strong>Réglages → Données &amp; sauvegarde</strong>, l’application envoie une copie de ses
+  données au service décrit ci-dessus, afin de pouvoir les restaurer en cas de perte ou de
+  changement d’appareil.</p>
+  <ul>
+    <li>La clé de rangement est dérivée de votre phrase secrète par une empreinte
+    <code>SHA-256</code> : la phrase elle-même n’est jamais enregistrée sur le serveur.</li>
+    <li><strong>La sauvegarde n’est pas chiffrée</strong> : son contenu est stocké tel quel.
+    Toute personne connaissant la phrase secrète peut le lire. Choisissez une phrase longue,
+    propre à cet usage, et ne la réutilisez nulle part ailleurs.</li>
+    <li>Les six versions antérieures sont conservées, pour permettre un retour en arrière après
+    une fausse manœuvre.</li>
+    <li>Aucune donnée n’est envoyée tant qu’aucune phrase secrète n’est renseignée.</li>
+  </ul>
+  <p>Pour cesser d’envoyer des sauvegardes, effacez la phrase secrète dans les réglages. Pour
+  faire supprimer une sauvegarde déjà envoyée, utilisez l’adresse de contact de la section 8.</p>
+</div>
+
+<div class="card">
+  <h2>6. Ce que l’application ne fait pas</h2>
+  <ul>
+    <li>Aucune publicité.</li>
+    <li>Aucun traqueur, aucun cookie de suivi, aucune mesure d’audience.</li>
+    <li>Aucune revente, location ni partage de données avec des tiers.</li>
+    <li>Aucun profilage, aucune décision automatisée.</li>
+    <li>Aucune donnée utilisée pour entraîner un modèle d’intelligence artificielle.</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h2>7. Conservation et suppression</h2>
+  <ul>
+    <li><strong>Sur l’appareil :</strong> les données sont conservées tant que l’application est
+    installée. Supprimer l’application, ou effacer les données du site dans les réglages du
+    navigateur, les efface définitivement.</li>
+    <li><strong>Google Agenda :</strong> révoquer l’accès (section 3) interrompt immédiatement
+    toute lecture.</li>
+    <li><strong>Sauvegarde cloud :</strong> voir la section 5.</li>
+  </ul>
+  <p>Les données saisies concernant des élèves relèvent de la responsabilité de la professeure
+  qui les enregistre, en sa qualité de responsable de traitement.</p>
+</div>
+
+<div class="card">
+  <h2>8. Contact</h2>
+  <p>Pour toute question relative à ces règles, ou pour demander la suppression d’une sauvegarde
+  cloud, écrivez à l’adresse d’assistance indiquée sur l’écran de consentement Google de
+  l’application, affichée lors de la connexion du compte Google.</p>
+</div>
+
+<div class="card">
+  <h2>9. Modifications</h2>
+  <p>Toute modification de ces règles sera publiée sur cette page, accompagnée de sa date de mise
+  à jour.</p>
+</div>
+
+<footer>
+  <a href="./">← Retour à l’application</a><br>
+  Loane Pro
+</footer>
+
+</div>
+</body>
+</html>
