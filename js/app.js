@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.8.2';
+const APP_VERSION = '3.8.3';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -570,11 +570,29 @@ const Cloud = {
     let n = 0;
     for (const k of Object.keys(data)) if (Array.isArray(data[k]) && k !== 'settings') n += data[k].length;
     if (n === 0) { toast('La sauvegarde ne contient aucune donnée'); return; }
-    if (!confirm(`Restaurer ${n} enregistrement(s) ?\n\nIls seront fusionnés avec ce qui est déjà sur l’appareil.`)) return;
+
+    // Restaurer la sauvegarde courante, c'est se remettre au même état que le cloud :
+    // les suppressions faites sur l'autre appareil s'appliquent ici aussi.
+    // Restaurer une version d'archive, c'est revenir en arrière après une fausse
+    // manœuvre : là, au contraire, on veut récupérer ce qui a été supprimé.
+    const fusion = !ts;
+    let aSupprimer = 0;
+    if (fusion) {
+      try { aSupprimer = await DB.compterSuppressions(data); } catch (e) { aSupprimer = 0; }
+    }
+    const question = fusion
+      ? `Restaurer ${n} enregistrement(s) ?\n\nIls seront fusionnés avec ce qui est déjà sur l’appareil.`
+        + (aSupprimer ? `\n\n⚠️ ${aSupprimer} enregistrement(s) supprimé(s) depuis un autre appareil seront aussi retirés d’ici. C’est définitif.` : '')
+      : `Revenir à cette version antérieure ?\n\n${n} enregistrement(s) seront remis en place, y compris ceux supprimés depuis. Rien ne sera effacé.`;
+    if (!confirm(question)) return;
+
     try {
-      await DB.importAll(data);
+      const bilan = await DB.importAll(data, { suppressions: fusion });
       localStorage.removeItem('cloud_sig');       // la base a changé : prochain envoi réel
-      toast('Restauré : ' + n + ' enregistrement(s) ✓');
+      let msg = 'Restauré : ' + bilan.importes + ' enregistrement(s)';
+      if (bilan.supprimes) msg += ' · ' + bilan.supprimes + ' retiré(s)';
+      if (bilan.ignores) msg += ' · ' + bilan.ignores + ' ignoré(s)';
+      toast(msg + ' ✓');
       refreshView();
     } catch (e) {
       console.error('restore import', e);
@@ -2312,7 +2330,12 @@ async function settingsData() {
   $('#bk-import').onclick = () => $('#bk-file').click();
   $('#bk-file').onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
-    try { await DB.importAll(JSON.parse(await f.text())); localStorage.removeItem('cloud_sig'); toast('Restauré ✓'); renderSettings(); }
+    try {
+      // Fichier choisi à la main : on remet tout en place, sans appliquer de suppression.
+      const b = await DB.importAll(JSON.parse(await f.text()), { suppressions: false });
+      localStorage.removeItem('cloud_sig');
+      toast('Restauré : ' + b.importes + ' enregistrement(s) ✓'); renderSettings();
+    }
     catch (err) { toast('Fichier invalide'); }
   };
 }

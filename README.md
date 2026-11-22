@@ -44,7 +44,22 @@ La synchro nécessite deux choses : des identifiants Google (gratuits) et un Wor
 
    > ⚠️ **Important — la synchro qui s'arrête toute seule au bout d'une semaine.**
    > Tant que le projet reste en mode **Test**, Google invalide l'autorisation **tous les 7 jours** : la synchro cesse alors de fonctionner jusqu'à ce qu'on reclique sur « Connecter Google Agenda ». L'app le détecte et affiche « Autorisation Google expirée » dans l'agenda et dans les réglages.
-   > Pour ne plus jamais avoir à reconnecter : dans **Écran de consentement OAuth**, clique sur **Publier l'application** (l'avertissement « application non vérifiée » à la première connexion est sans conséquence pour un usage personnel).
+   > Pour ne plus jamais avoir à reconnecter : publie l'application. Dans la console Google, **Google Auth Platform → Audience** (ancienne interface : *API et services → Écran de consentement OAuth*) → **Publier l'application**.
+   >
+   > Si le bouton est **grisé**, Google réclame d'abord quatre informations dans **Google Auth Platform → Branding** :
+   >
+   > | Champ | Valeur |
+   > |---|---|
+   > | Nom de l'application | `Loane Pro` |
+   > | E-mail d'assistance | à choisir dans la liste déroulante |
+   > | URL de la page d'accueil | `https://TON-COMPTE.github.io/Loane-Pro/` |
+   > | URL des règles de confidentialité | `https://TON-COMPTE.github.io/Loane-Pro/confidentialite.html` |
+   >
+   > La page `confidentialite.html` est fournie dans ce dépôt : elle est en ligne dès que GitHub Pages a publié. Les deux URL doivent être différentes — c'est pour cela qu'il faut une page dédiée.
+   >
+   > Une fois publiée, l'avertissement « Google n'a pas validé cette application » apparaît à la connexion : **Paramètres avancés → Continuer**. Sans conséquence pour un usage personnel (limite de 100 utilisateurs sans validation).
+   >
+   > **Ordre conseillé** : publier d'abord, reconnecter ensuite — le jeton est alors émis en production et n'expire plus.
 4. **API et services → Identifiants → Créer des identifiants → ID client OAuth** :
    - Type : **Application Web**
    - URI de redirection autorisé : `https://studio-vocal-auth.TON-COMPTE.workers.dev/auth/callback`
@@ -103,7 +118,7 @@ La synchro nécessite deux choses : des identifiants Google (gratuits) et un Wor
 | **Élèves** | Profils avec photo, coordonnées, niveau, points forts, difficultés · historique des cours faits et à venir · suivi des paiements avec alerte « À encaisser » · notes de cours datées |
 | **Factures** | Factures **et devis** numérotés automatiquement, menus déroulants élève / type de cours / forfait, impression ou export PDF depuis Safari |
 | **Répertoire** | Fiches morceaux : titre, artiste, tags, paroles, et pièces jointes (partitions PDF, images), avec recherche |
-| **Réglages** | Coordonnées pour les factures, types de cours et forfaits personnalisables, connexion Google, sauvegarde/restauration |
+| **Réglages** | Coordonnées pour les factures, types de cours et forfaits personnalisables, connexion Google (avec diagnostic de la synchro), sauvegarde/restauration |
 
 ## Suivi des paiements — comment ça marche
 
@@ -125,8 +140,20 @@ La phrase secrète n'est jamais stockée en clair sur le serveur : elle sert de 
 
 - Les pièces jointes du répertoire sont limitées à ~8 Mo par fichier, et la sauvegarde cloud à 20 Mo au total (largement suffisant sauf si tu stockes énormément de partitions PDF — dans ce cas garde aussi l'export JSON local).
 - La synchro Google est **en lecture seule** (Google → app). L'app n'écrit jamais dans Google Agenda.
-- La sauvegarde cloud est une **copie de sécurité**, pas une synchronisation entre deux téléphones : la restauration **fusionne** le cloud avec l'appareil, et une suppression faite sur un appareil n'est pas répercutée sur l'autre. À n'utiliser en pratique que depuis un seul téléphone à la fois.
+- La sauvegarde cloud est une **copie de sécurité**, pas une synchronisation permanente entre deux téléphones : elle part automatiquement à chaque modification, mais la restauration reste une action manuelle.
 - Le cloud garde les **6 dernières versions** antérieures, archivées au plus une fois toutes les 6 h (Réglages → Données & sauvegarde → Historique cloud).
+
+## Suppressions et restauration
+
+Une sauvegarde ne contient que ce qui **existe**. Sans précaution, un élève supprimé sur un téléphone réapparaissait à la restauration suivante, ressuscité par la copie de l'autre appareil. L'app note donc chaque suppression dans une petite marque qui voyage avec la sauvegarde, et distingue deux gestes :
+
+| Geste | Effet |
+|---|---|
+| **Restaurer depuis le cloud** (version courante) | Se remettre au même état que le cloud. Les suppressions faites sur l'autre appareil sont appliquées ici aussi — l'app annonce combien d'enregistrements seront retirés **avant** de le faire. Ce qui a été supprimé ici n'est pas ressuscité. |
+| **Restaurer une version de l'historique** | Revenir en arrière après une fausse manœuvre. Tout est remis en place, **y compris ce qui a été supprimé depuis**. Rien n'est effacé. |
+| **Restaurer un fichier JSON** | Comme une version de l'historique : tout est remis en place, rien n'est effacé. |
+
+Les marques de suppression sont purgées au bout de 6 mois.
 
 ## En cas de problème
 

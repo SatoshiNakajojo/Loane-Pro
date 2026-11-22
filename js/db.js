@@ -54,9 +54,65 @@ const DB = (() => {
 
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
+  // ---- Marques de suppression ----------------------------------------------
+  // La sauvegarde cloud ne transporte que ce qui EXISTE : un enregistrement
+  // supprimé sur un appareil réapparaissait donc à la restauration suivante,
+  // ressuscité par la copie de l'autre appareil. On note chaque suppression
+  // dans une marque, rangée avec les réglages pour voyager avec la sauvegarde.
+  const TOMBES = 'suppressions';
+  const DUREE_TOMBE = 180 * 864e5;            // au-delà, la marque n'a plus d'utilité
+  const SANS_TOMBE = new Set(['settings', LOCAL]);
+  const cle = (store, id) => store + '\u0000' + id;
+
+  function lire(store, id) {
+    return open().then(db => new Promise((res, rej) => {
+      const r = db.transaction(store).objectStore(store).get(id);
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    }));
+  }
+
+  async function tombes() {
+    try {
+      const row = await lire('settings', TOMBES);
+      return (row && Array.isArray(row.value)) ? row.value.filter(t => t && t.s && t.i) : [];
+    } catch (e) { return []; }
+  }
+
+  async function ecrireTombes(liste) {
+    const limite = Date.now() - DUREE_TOMBE;
+    const vues = new Set(), propre = [];
+    for (const t of liste) {
+      if (!t || !t.s || !t.i || !(t.t > limite)) continue;
+      const k = cle(t.s, t.i);
+      if (vues.has(k)) continue;
+      vues.add(k); propre.push(t);
+    }
+    await tx('settings', 'readwrite', st => st.put({ id: TOMBES, value: propre }));
+    return propre;
+  }
+
+  async function marquer(store, id) {
+    if (SANS_TOMBE.has(store)) return;
+    await ecrireTombes([{ s: store, i: id, t: Date.now() }, ...(await tombes())]);
+  }
+
+  // Un enregistrement réécrit existe de nouveau : sa marque n'a plus lieu d'être.
+  async function demarquer(store, id) {
+    if (SANS_TOMBE.has(store)) return;
+    const liste = await tombes();
+    const k = cle(store, id);
+    if (!liste.some(t => cle(t.s, t.i) === k)) return;
+    await ecrireTombes(liste.filter(t => cle(t.s, t.i) !== k));
+  }
+
   return {
     uid,
-    async put(store, obj) { if (!obj.id) obj.id = uid(); await tx(store, 'readwrite', s => s.put(obj)); return obj; },
+    async put(store, obj) {
+      if (!obj.id) obj.id = uid();
+      await tx(store, 'readwrite', s => s.put(obj));
+      await demarquer(store, obj.id);
+      return obj;
+    },
     async get(store, id) {
       const db = await open();
       return new Promise((res, rej) => {
@@ -78,7 +134,11 @@ const DB = (() => {
         r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error);
       });
     },
-    async del(store, id) { return tx(store, 'readwrite', s => s.delete(id)); },
+    async del(store, id) {
+      const r = await tx(store, 'readwrite', s => s.delete(id));
+      await marquer(store, id);
+      return r;
+    },
     // valeurs locales (jamais exportées) : identifiants, cache Google
     async getLocal(key, fallback) {
       try { const row = await this.get(LOCAL, key); return row ? row.value : fallback; }
@@ -100,11 +160,75 @@ const DB = (() => {
       for (const s of STORES) out[s] = await this.all(s);
       return out;
     },
-    async importAll(data) {
+    // Combien d'enregistrements la sauvegarde retirerait-elle ici ?
+    // Sert à l'annoncer AVANT de restaurer, car c'est irréversible.
+    async compterSuppressions(data) {
+      const entrantes = ((data.settings || []).find(r => r && r.id === TOMBES) || {}).value;
+      if (!Array.isArray(entrantes)) return 0;
+      const presentes = new Set();
+      for (const s of STORES) if (!SANS_TOMBE.has(s)) for (const r of await this.all(s)) presentes.add(cle(s, r.id));
+      const vivants = new Set();
+      for (const s of STORES) if (Array.isArray(data[s])) for (const r of data[s]) vivants.add(cle(s, r.id));
+      let n = 0;
+      for (const t of entrantes) {
+        if (!t || !t.s || !t.i || SANS_TOMBE.has(t.s)) continue;
+        const k = cle(t.s, t.i);
+        if (presentes.has(k) && !vivants.has(k)) n++;      // la sauvegarde ne le contient plus
+      }
+      return n;
+    },
+
+    // options.suppressions :
+    //   true  → fusion entre appareils : les suppressions faites ailleurs sont
+    //           appliquées ici, et ce qu'on a supprimé ici n'est pas ressuscité.
+    //   false → retour en arrière sur une version d'archive : on veut justement
+    //           récupérer ce qui a été supprimé, donc aucune marque ne bloque.
+    async importAll(data, options) {
+      const avecTombes = !!(options && options.suppressions);
+      const bilan = { importes: 0, ignores: 0, supprimes: 0 };
+
+      const locales = await tombes();
+      const entrantes = avecTombes
+        ? (((data.settings || []).find(r => r && r.id === TOMBES) || {}).value || [])
+        : [];
+      const fusion = [...locales, ...(Array.isArray(entrantes) ? entrantes : [])];
+      const bloquees = new Set(avecTombes
+        ? fusion.filter(t => t && t.s && t.i && !SANS_TOMBE.has(t.s)).map(t => cle(t.s, t.i))
+        : []);
+
+      // 1) écriture des enregistrements de la sauvegarde
+      const ecrits = new Set();
       for (const s of STORES) {
         if (!Array.isArray(data[s])) continue;
-        for (const row of data[s]) await tx(s, 'readwrite', st => st.put(row));
+        for (const row of data[s]) {
+          if (!row || row.id === undefined) continue;
+          if (s === 'settings' && row.id === TOMBES) continue;   // géré à part, plus bas
+          const k = cle(s, row.id);
+          if (bloquees.has(k)) { bilan.ignores++; continue; }    // supprimé ici volontairement
+          await tx(s, 'readwrite', st => st.put(row));
+          ecrits.add(k);
+          bilan.importes++;
+        }
       }
+
+      // 2) suppressions venues d'un autre appareil
+      if (avecTombes) {
+        for (const t of fusion) {
+          if (!t || !t.s || !t.i || SANS_TOMBE.has(t.s)) continue;
+          const k = cle(t.s, t.i);
+          if (ecrits.has(k)) continue;                           // réécrit : la marque est périmée
+          if (await lire(t.s, t.i)) {
+            await tx(t.s, 'readwrite', st => st.delete(t.i));
+            bilan.supprimes++;
+          }
+        }
+      }
+
+      // 3) mise à jour des marques
+      if (avecTombes) await ecrireTombes(fusion.filter(t => t && !ecrits.has(cle(t.s, t.i))));
+      else if (ecrits.size) await ecrireTombes(locales.filter(t => t && !ecrits.has(cle(t.s, t.i))));
+
+      return bilan;
     }
   };
 })();
