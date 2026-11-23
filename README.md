@@ -104,7 +104,11 @@ La synchro nécessite deux choses : des identifiants Google (gratuits) et un Wor
 **La synchro est en lecture seule : l'app ne modifie jamais Google Agenda.** Rien n'y est ajouté, modifié ni supprimé.
 
 - L'app **lit** les événements du calendrier principal (rendez-vous horaires **et** journées entières) et les affiche dans l'agenda.
-- Toucher un événement Google permet de le **rattacher** à un élève : il devient une séance de l'app et compte dans les heures effectuées et les forfaits.
+- **La couleur de l'événement dit s'il s'agit d'un cours**, et où il a lieu. Par défaut : **lavande** = cours à domicile, **raisin** = cours à l'école. Les événements d'une autre couleur — ou sans couleur attribuée — sont ignorés : ils n'encombrent ni l'agenda ni la liste « à rattacher ». Ces deux couleurs se changent dans **Réglages → Google Agenda**.
+- Un événement de la bonne couleur dont le titre désigne **un seul élève existant** est **rattaché automatiquement**. Le cours est créé « en attente » : il ne compte ni dans les heures ni dans les forfaits tant qu'il n'a pas été validé depuis la **fiche de l'élève** (section « Cours en attente », bouton ✓ Valider).
+- Si un cours a déjà été saisi à la main au même moment pour cet élève, l'app ne crée pas de doublon : elle rapproche les deux.
+- Ne restent donc « à rattacher » que les événements que l'app ne peut pas décider seule : **nouveaux élèves**, **homonymes de prénom**, ou séances qui ne sont pas des cours.
+- Le rattachement automatique s'annule **en un seul geste** avec le bouton ↺, quel que soit le nombre de cours concernés.
 - Un glissement vers la gauche permet d'**ignorer** un événement (il reste intact dans Google Agenda).
 - La synchro a lieu à l'ouverture de l'app, au retour au premier plan (au plus une fois par heure) et via le bouton **🔄 Synchroniser**. Les événements de la dernière synchro sont conservés sur l'appareil : l'agenda reste complet même hors ligne.
 

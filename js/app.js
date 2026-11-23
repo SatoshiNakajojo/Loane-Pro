@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.8.4';
+const APP_VERSION = '3.9.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -43,6 +43,61 @@ const KINDS = {
   perso: { label: 'Perso (hors travail)', icon: '🏡', student: false, paid: false, travail: false }
 };
 const estTravail = l => (KINDS[l.kind || 'cours'] || {}).travail !== false;
+
+// --- Rapprochement d'un événement Google avec un élève ---
+// Accents retirés, ponctuation ignorée : « Cours Léa B. » et « lea » se rejoignent.
+const sansAccent = x => (x || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const motsDe = x => sansAccent(x).split(/[^a-z0-9]+/).filter(m => m.length >= 3);
+// --- Couleurs Google ---
+// C'est la couleur de l'événement, et elle seule, qui dit si c'est un cours et où
+// il a lieu : un titre est trop incertain. Identifiants officiels de la palette
+// « événement » de Google Agenda.
+const COULEURS_GOOGLE = {
+  '1': 'Lavande', '2': 'Sauge', '3': 'Raisin', '4': 'Flamant rose',
+  '5': 'Banane', '6': 'Mandarine', '7': 'Paon', '8': 'Graphite',
+  '9': 'Myrtille', '10': 'Basilic', '11': 'Tomate'
+};
+const COULEURS_DEFAUT = { domicile: '1', ecole: '3' };   // lavande / raisin
+function couleursCours() {
+  try {
+    const v = JSON.parse(localStorage.getItem('gc_couleurs') || 'null');
+    return (v && typeof v === 'object') ? { ...COULEURS_DEFAUT, ...v } : { ...COULEURS_DEFAUT };
+  } catch (e) { return { ...COULEURS_DEFAUT }; }
+}
+// Un événement sans couleur attribuée prend celle de l'agenda : Google ne renvoie
+// alors aucun colorId, et l'événement n'est donc jamais pris pour un cours.
+function lieuDeCouleur(colorId) {
+  const id = String(colorId || '');
+  if (!id) return null;
+  for (const [lieu, c] of Object.entries(couleursCours())) if (c && c === id) return lieu;
+  return null;
+}
+const estCoursGoogle = ev => !!lieuDeCouleur(ev && ev.colorId);
+// Par défaut on ne montre que les cours : les rendez-vous personnels d'un autre
+// coloris n'encombrent ni l'agenda ni la liste « à rattacher ».
+const seulementCours = () => localStorage.getItem('gc_seulement_cours') !== '0';
+const evenementsAffichables = () => seulementCours() ? gcalCache.filter(estCoursGoogle) : gcalCache;
+
+// Renvoie l'élève UNIQUEMENT si la correspondance est certaine.
+// Dans le doute (homonymes, plusieurs élèves cités), on ne devine pas :
+// l'événement reste dans « à rattacher », où il sera traité à la main.
+function eleveDeLEvenement(titre, eleves) {
+  const mots = new Set(motsDe(titre));
+  if (!mots.size) return null;
+  // 1) nom complet : tous les mots du nom de l'élève figurent dans le titre
+  const complets = eleves.filter(e => {
+    const n = motsDe(e.name);
+    return n.length && n.every(m => mots.has(m));
+  });
+  if (complets.length === 1) return complets[0];
+  if (complets.length > 1) return null;                 // plusieurs élèves cités
+  // 2) prénom seul, à condition qu'un seul élève puisse correspondre
+  const parPrenom = eleves.filter(e => {
+    const n = motsDe(e.name);
+    return n.length && mots.has(n[0]);
+  });
+  return parPrenom.length === 1 ? parPrenom[0] : null;   // homonymes : on s'abstient
+}
 // Les séances créées à l'avance attendent une validation ; les anciennes sont considérées faites
 const estValide = l => (l.status || 'done') === 'done';
 const enAttente = l => !estValide(l) && new Date(l.date) <= Date.now();
@@ -401,7 +456,18 @@ const GC = {
   async synchroniser(silencieux) {
     try {
       gcalCache = await this.pullEvents();
-      if (!silencieux) toast(gcalCache.length + ' événement(s) Google ✓');
+      // Les cours reconnus à leur couleur sont rattachés dans la foulée ;
+      // seul le reste demandera une intervention.
+      let bilan = null;
+      try { bilan = await rattacherAuto(); }
+      catch (e) { console.error('rattachement auto', e); }
+      if (bilan) {
+        const n = bilan.crees + bilan.lies;
+        toast(n + ' cours rattaché' + (n > 1 ? 's' : '') + ' automatiquement — à valider');
+      } else if (!silencieux) {
+        const cours = gcalCache.filter(estCoursGoogle).length;
+        toast(gcalCache.length + ' événement(s) · ' + cours + ' cours ✓');
+      }
       return true;
     } catch (e) {
       const msg = MESSAGE_GOOGLE[e && e.cause] || 'Échec de la synchro';
@@ -675,6 +741,9 @@ function cloudBadge(etat) {
 // ====== Annulation des 5 dernières actions ======
 const Undo = {
   pile: [],
+  // Pendant un traitement par lot, on n'empile pas chaque écriture : la pile ne
+  // garde que 5 entrées et serait noyée. Le lot pose UNE entrée qui l'annule en bloc.
+  silence: false,
   libelles: { students: 'élève', lessons: 'séance', payments: 'paiement', notes: 'note', invoices: 'document', library: 'morceau' },
   ajouter(libelle, inverse) {
     this.pile.push({ libelle, inverse });
@@ -710,7 +779,7 @@ const Undo = {
       existait = !!avant;
     }
     const r = await brut.put(store, obj);
-    if (!sansHistorique.has(store)) {
+    if (!sansHistorique.has(store) && !Undo.silence) {
       const quoi = Undo.libelles[store] || 'élément';
       if (existait) Undo.ajouter('modification ' + quoi, () => brut.put(store, avant));
       else Undo.ajouter('ajout ' + quoi, () => brut.del(store, r.id));
@@ -722,7 +791,7 @@ const Undo = {
   DB.del = async function (store, id) {
     const avant = sansHistorique.has(store) ? null : await brut.get(store, id);
     const r = await brut.del(store, id);
-    if (avant) Undo.ajouter('suppression ' + (Undo.libelles[store] || 'élément'), () => brut.put(store, avant));
+    if (avant && !Undo.silence) Undo.ajouter('suppression ' + (Undo.libelles[store] || 'élément'), () => brut.put(store, avant));
     Cloud.schedule();
     return r;
   };
@@ -870,7 +939,7 @@ async function agendaItems() {
     date: l.date, lesson: l, kind: l.kind || 'cours',
     label: (students[l.studentId] ? students[l.studentId].name : (l.title || KINDS[l.kind || 'cours'].label))
   }));
-  for (const e of gcalCache) {
+  for (const e of evenementsAffichables()) {
     if (!linked.has(e.id) && !ignores.has(e.id)) items.push({ date: gcDebut(e), gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
   }
   return items.sort((a, b) => new Date(a.date) - new Date(b.date));
@@ -1171,6 +1240,94 @@ function sheetPastList(events) {
   });
 }
 
+// Rattache automatiquement aux élèves les événements Google qui sont des cours.
+// Deux conditions, toutes deux nécessaires :
+//   - la COULEUR de l'événement est une de celles réservées aux cours (elle donne
+//     aussi le lieu) : c'est ce qui distingue un cours d'un rendez-vous perso ;
+//   - le titre désigne UN SEUL élève existant, sans ambiguïté.
+// Les cours créés sont « en attente » : ils ne comptent ni dans les heures ni dans
+// les forfaits tant qu'ils n'ont pas été validés depuis la fiche de l'élève.
+// Ne restent « à rattacher » que les événements sans élève identifiable (nouveaux
+// élèves) ou d'une autre couleur (séances qui ne sont pas des cours).
+async function rattacherAuto() {
+  if (localStorage.getItem('gc_auto') === '0') return null;
+  if (!gcalCache.length) return null;
+
+  const eleves = await DB.all('students');
+  if (!eleves.length) return null;
+  const lecons = await DB.all('lessons');
+  const dejaLies = new Set(lecons.map(l => l.gcalEventId).filter(Boolean));
+  const { courseTypes } = await getConfig();
+  const typeParDefaut = courseTypes[0] || 'Cours de chant individuel';
+  const typeCollectif = courseTypes.find(t => /collectif/i.test(t));
+
+  // Un cours déjà saisi à la main pour cet élève, au même moment, ne doit pas être
+  // dupliqué : on se contente de lui accrocher l'identifiant de l'événement Google.
+  const PROXIMITE = 120 * 60000;
+  const dejaPresent = (eleveId, debut) => lecons.find(l =>
+    l.studentId === eleveId && !l.gcalEventId &&
+    Math.abs(new Date(l.date) - debut) < PROXIMITE);
+
+  const crees = [], lies = [];
+  Undo.silence = true;
+  try {
+    for (const ev of gcalCache) {
+      if (dejaLies.has(ev.id) || ignores.has(ev.id)) continue;
+      if (gcJournee(ev)) continue;                       // une journée entière n'est pas un cours
+
+      const lieu = lieuDeCouleur(ev.colorId);
+      if (!lieu) continue;                               // couleur non réservée aux cours
+
+      const titre = ev.summary || '';
+      const eleve = eleveDeLEvenement(titre, eleves);
+      if (!eleve) continue;                              // nouvel élève, ou homonymes
+
+      const debut = new Date(gcDebut(ev));
+      if (isNaN(debut)) continue;
+
+      const existant = dejaPresent(eleve.id, debut);
+      if (existant) {                                    // rapprochement, pas de doublon
+        existant.gcalEventId = ev.id;
+        await DB.put('lessons', existant);
+        dejaLies.add(ev.id);
+        lies.push(existant.id);
+        continue;
+      }
+
+      const fin = gcFin(ev);
+      const duree = fin ? Math.min(600, Math.max(15, Math.round((new Date(fin) - debut) / 60000))) : 60;
+      const cours = {
+        id: DB.uid(), kind: 'cours', studentId: eleve.id, title: '',
+        date: debut.toISOString(), duration: duree,
+        type: (/collectif/i.test(titre) && typeCollectif) ? typeCollectif : typeParDefaut,
+        lieu,
+        status: 'planned',                               // à confirmer depuis la fiche élève
+        paid: true, fee: 0,
+        note: ev.description || '',
+        gcalEventId: ev.id, auto: true
+      };
+      await DB.put('lessons', cours);
+      lecons.push(cours);
+      dejaLies.add(ev.id);
+      crees.push(cours.id);
+    }
+  } finally { Undo.silence = false; }
+
+  if (!crees.length && !lies.length) return null;
+  const total = crees.length + lies.length;
+  Undo.ajouter(`rattachement automatique de ${total} cours`, async () => {
+    Undo.silence = true;
+    try {
+      for (const id of crees) await DB.del('lessons', id);
+      for (const id of lies) {
+        const l = await DB.get('lessons', id);
+        if (l) { delete l.gcalEventId; await DB.put('lessons', l); }
+      }
+    } finally { Undo.silence = false; }
+  });
+  return { crees: crees.length, lies: lies.length };
+}
+
 // Convertir un événement Google en séance
 async function sheetImportGcal(ev) {
   const students = await DB.all('students');
@@ -1413,7 +1570,7 @@ async function renderHours() {
   // les événements Google non rattachés ne sont comptés nulle part : on le signale
   const lies = new Set((await DB.all('lessons')).map(l => l.gcalEventId).filter(Boolean));
   const bornes = hoursRange === 'week' ? startWeek : hoursRange === 'month' ? startMonth : new Date(0);
-  const orphelins = gcalCache.filter(e => !lies.has(e.id) && !ignores.has(e.id)
+  const orphelins = evenementsAffichables().filter(e => !lies.has(e.id) && !ignores.has(e.id)
     && new Date(gcDebut(e)) <= now && new Date(gcDebut(e)) >= bornes);
   if (orphelins.length) html += `<div class="card accent tappable" id="orphelins">
       <div class="title">📥 ${orphelins.length} événement${orphelins.length > 1 ? 's' : ''} Google non rattaché${orphelins.length > 1 ? 's' : ''}</div>
@@ -2115,12 +2272,28 @@ async function settingsGoogle() {
         <div class="sub" style="margin-top:8px"><b>Lecture seule :</b> l\u2019app récupère les événements de Google Agenda mais n\u2019y écrit jamais. Rien n\u2019y est ajouté, modifié ni supprimé.</div>
         ${GC.aReconnecter ? `<div class="sub" style="margin-top:8px">Google a révoqué l\u2019accès. Tant que le projet Google reste en mode « Test », l\u2019autorisation expire tous les 7 jours : publie l\u2019application dans la console Google pour ne plus avoir à reconnecter.</div>
           <button class="btn" id="gc-on">Reconnecter Google Agenda</button>` : ''}
-        <div class="sub" style="margin-top:8px">${GC.derniereSync ? 'Dernière synchro : ' + new Date(GC.derniereSync).toLocaleString('fr-FR') + ' · ' + gcalCache.length + ' événement(s)' : 'Jamais synchronisé sur cet appareil'}</div>
+        <div class="sub" style="margin-top:8px">${GC.derniereSync ? 'Dernière synchro : ' + new Date(GC.derniereSync).toLocaleString('fr-FR') + ' · ' + gcalCache.length + ' événement(s) dont ' + gcalCache.filter(estCoursGoogle).length + ' cours' : 'Jamais synchronisé sur cet appareil'}</div>
         <label class="field" style="margin-top:12px"><span>Récupérer les événements depuis le</span>
           <input type="date" id="gc-since" value="${localStorage.getItem('gc_since') || GC_DEPUIS_DEFAUT}"></label>
         <label class="switch"><input type="checkbox" id="gc-journees" ${localStorage.getItem('gc_journees') !== '0' ? 'checked' : ''}>
           <span class="track"></span>
           <span class="lbl">Événements sur la journée entière<small>Les afficher aussi dans l\u2019agenda</small></span></label>
+
+        <h2 class="section" style="margin-top:18px">Reconnaissance des cours</h2>
+        <div class="sub">C\u2019est la <b>couleur</b> de l\u2019événement dans Google Agenda qui dit s\u2019il s\u2019agit d\u2019un cours, et où il a lieu. Les autres couleurs sont ignorées.</div>
+        ${Object.entries(LIEUX).map(([cle, libelle]) => `
+          <label class="field" style="margin-top:10px"><span>Couleur des cours « ${esc(libelle)} »</span>
+            <select data-couleur="${cle}">
+              <option value="">— aucune —</option>
+              ${Object.entries(COULEURS_GOOGLE).map(([id, nom]) =>
+                `<option value="${id}" ${couleursCours()[cle] === id ? 'selected' : ''}>${nom}</option>`).join('')}
+            </select></label>`).join('')}
+        <label class="switch"><input type="checkbox" id="gc-auto" ${localStorage.getItem('gc_auto') !== '0' ? 'checked' : ''}>
+          <span class="track"></span>
+          <span class="lbl">Rattacher les cours automatiquement<small>Quand le titre désigne un seul élève existant. Le cours reste « en attente » : tu le confirmes depuis sa fiche.</small></span></label>
+        <label class="switch"><input type="checkbox" id="gc-seulement" ${seulementCours() ? 'checked' : ''}>
+          <span class="track"></span>
+          <span class="lbl">N\u2019afficher que les cours<small>Décoche pour voir aussi tes rendez-vous personnels dans l\u2019agenda.</small></span></label>
         <button class="btn secondary" id="gc-resync">Resynchroniser maintenant</button>
         ${GC.aReconnecter ? '' : `<button class="btn secondary" id="gc-reconnect">🔁 Reconnecter le compte Google</button>
           <div class="sub" style="margin-top:-4px">À faire après avoir publié l\u2019application dans la console Google : le jeton actuel garde sinon la limite de 7 jours du mode « Test ».</div>`}
@@ -2148,6 +2321,26 @@ async function settingsGoogle() {
   if (jrs) jrs.onchange = async e => {
     localStorage.setItem('gc_journees', e.target.checked ? '1' : '0');
     await GC.synchroniser(true); renderSettings();
+  };
+  view.querySelectorAll('[data-couleur]').forEach(sel => sel.onchange = async () => {
+    const c = couleursCours();
+    c[sel.dataset.couleur] = sel.value;
+    // Deux lieux ne peuvent pas partager la même couleur : on libère l'autre.
+    for (const k of Object.keys(c)) if (k !== sel.dataset.couleur && c[k] === sel.value && sel.value) c[k] = '';
+    localStorage.setItem('gc_couleurs', JSON.stringify(c));
+    toast('Couleur enregistrée ✓');
+    await GC.synchroniser(true); renderSettings();
+  });
+  const auto = $('#gc-auto');
+  if (auto) auto.onchange = async e => {
+    localStorage.setItem('gc_auto', e.target.checked ? '1' : '0');
+    if (e.target.checked) await GC.synchroniser(true);
+    renderSettings();
+  };
+  const seul = $('#gc-seulement');
+  if (seul) seul.onchange = e => {
+    localStorage.setItem('gc_seulement_cours', e.target.checked ? '1' : '0');
+    renderSettings();
   };
   const since = $('#gc-since');
   if (since) since.onchange = e => { localStorage.setItem('gc_since', e.target.value); toast('Date enregistrée ✓'); };
