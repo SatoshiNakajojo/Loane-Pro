@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.9.0';
+const APP_VERSION = '3.9.1';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -1038,7 +1038,7 @@ async function renderAgenda() {
   const av = $('#a-valider');
   if (av) av.onclick = () => sheetAValider(aValider);
   const pastBtn = $('#past-import');
-  if (pastBtn) pastBtn.onclick = () => sheetPastList(gPast);   // uniquement ceux qui ne sont pas encore rattachés
+  if (pastBtn) pastBtn.onclick = () => sheetGroupes(gPast);   // uniquement ceux qui ne sont pas encore rattachés
 }
 
 // --- Vue liste (à venir) ---
@@ -1210,6 +1210,162 @@ async function sheetAValider(liste) {
     for (const l of liste) { const x = await DB.get('lessons', l.id); if (x) { x.status = 'done'; await DB.put('lessons', x); } }
     closeSheet(); toast(liste.length + ' cours validés ✓'); refreshView();
   };
+}
+
+// ---- Rattachement groupé ----------------------------------------------------
+// Avec plusieurs centaines d'événements, les traiter un par un est hors de
+// portée. On les regroupe par intitulé : « Cecile » revient 30 fois, on choisit
+// l'élève une seule fois et les 30 suivent.
+const cleTitre = t => sansAccent(t || '').replace(/[^a-z0-9]+/g, ' ').trim();
+// « Cours Léa » doit proposer de créer l'élève « Léa », pas « Cours Léa ».
+const nomDepuisTitre = t => (t || '').replace(/^\s*(cours|s[ée]ance|chant)\s+(de\s+chant\s+)?/i, '').trim() || (t || '').trim();
+
+function grouperEvenements(events) {
+  const groupes = new Map();
+  for (const e of events) {
+    const k = cleTitre(e.summary) || '(sans titre)';
+    if (!groupes.has(k)) groupes.set(k, { cle: k, titre: (e.summary || '(sans titre)').trim(), events: [] });
+    groupes.get(k).events.push(e);
+  }
+  const liste = [...groupes.values()];
+  for (const g of liste) {
+    g.events.sort((a, b) => new Date(gcDebut(a)) - new Date(gcDebut(b)));
+    g.debut = gcDebut(g.events[0]);
+    g.fin = gcDebut(g.events[g.events.length - 1]);
+  }
+  return liste.sort((a, b) => b.events.length - a.events.length);
+}
+
+async function sheetGroupes(events) {
+  const eleves = (await DB.all('students')).sort((a, b) => a.name.localeCompare(b.name, 'fr'));
+  const groupes = grouperEvenements(events);
+  const { courseTypes } = await getConfig();
+
+  openSheet(`<h3>Rattacher par intitulé</h3>
+    <div class="sub" style="margin-bottom:12px">${events.length} événement(s) regroupés en ${groupes.length} intitulé(s).
+      Choisis l\u2019élève une seule fois : tous les événements du même intitulé suivent.</div>
+    <label class="switch"><input type="checkbox" id="g-done">
+      <span class="track"></span>
+      <span class="lbl">Marquer les cours passés comme déjà effectués<small>Décoché, ils partent en « à valider » dans la fiche de chaque élève. Coché, ils comptent immédiatement dans les heures et les forfaits.</small></span></label>
+    ${groupes.map((g, i) => {
+      const devine = eleveDeLEvenement(g.titre, eleves);
+      return `<div class="card">
+        <div class="row"><div class="grow"><div class="title">${esc(g.titre)}</div>
+          <div class="sub">${g.events.length} séance(s) · du ${fmtDateFull(g.debut)} au ${fmtDateFull(g.fin)}</div></div>
+          <span class="badge ghost">${g.events.length}</span></div>
+        <label class="field" style="margin-top:10px"><span>Rattacher à</span>
+          <select data-grp="${i}">
+            <option value="">— laisser de côté —</option>
+            <option value="__new">＋ Créer l\u2019élève « ${esc(nomDepuisTitre(g.titre))} »</option>
+            ${eleves.map(e => `<option value="${e.id}" ${devine && devine.id === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
+          </select></label>
+        <button class="btn ghost" style="margin-top:6px" data-ign-grp="${i}">Ignorer cet intitulé</button>
+      </div>`;
+    }).join('')}
+    <button class="btn" id="g-go">Rattacher les intitulés choisis</button>`);
+
+  $('#sheet').querySelectorAll('[data-ign-grp]').forEach(b => b.onclick = async () => {
+    const g = groupes[+b.dataset.ignGrp];
+    if (!confirm(`Ignorer les ${g.events.length} séance(s) « ${g.titre} » ?\n\nElles restent intactes dans Google Agenda, mais l\u2019app cessera de les proposer.`)) return;
+    for (const e of g.events) ignores.add(e.id);
+    await DB.setSetting('gcalIgnores', [...ignores]);
+    toast(g.events.length + ' séance(s) ignorée(s)');
+    closeSheet(); refreshView();
+  });
+
+  $('#g-go').onclick = async () => {
+    const choix = [];
+    $('#sheet').querySelectorAll('[data-grp]').forEach(sel => {
+      if (sel.value) choix.push({ groupe: groupes[+sel.dataset.grp], valeur: sel.value });
+    });
+    if (!choix.length) { toast('Aucun intitulé choisi'); return; }
+    const marquerFait = $('#g-done').checked;
+    const total = choix.reduce((n, c) => n + c.groupe.events.length, 0);
+    if (!confirm(`Rattacher ${total} séance(s) réparties sur ${choix.length} intitulé(s) ?`)) return;
+
+    const bouton = $('#g-go');
+    bouton.disabled = true; bouton.textContent = 'Rattachement…';
+    const bilan = await rattacherGroupes(choix, marquerFait, courseTypes);
+    closeSheet();
+    toast(`${bilan.crees} séance(s) rattachée(s)` + (bilan.lies ? ` · ${bilan.lies} rapprochée(s)` : '') + (bilan.eleves ? ` · ${bilan.eleves} élève(s) créé(s)` : ''));
+    refreshView();
+  };
+}
+
+// Applique les choix du rattachement groupé, avec les mêmes garde-fous que le
+// rattachement automatique : pas de doublon, et une seule entrée d'annulation.
+async function rattacherGroupes(choix, marquerFait, courseTypes) {
+  const typeParDefaut = courseTypes[0] || 'Cours de chant individuel';
+  const typeCollectif = courseTypes.find(t => /collectif/i.test(t));
+  const lecons = await DB.all('lessons');
+  // Un événement déjà rattaché ne doit jamais l'être une seconde fois : sans ce
+  // garde-fou, relancer l'écran recréait tout en double.
+  const dejaLies = new Set(lecons.map(l => l.gcalEventId).filter(Boolean));
+  const PROXIMITE = 120 * 60000;
+  const crees = [], lies = [], elevesCrees = [];
+
+  Undo.silence = true;
+  try {
+    for (const { groupe, valeur } of choix) {
+      let eleveId = valeur;
+      if (valeur === '__new') {
+        const nouvel = { id: DB.uid(), name: nomDepuisTitre(groupe.titre), lieu: 'ecole' };
+        await DB.put('students', nouvel);
+        elevesCrees.push(nouvel.id);
+        eleveId = nouvel.id;
+      }
+      const eleve = await DB.get('students', eleveId);
+      if (!eleve) continue;
+
+      for (const ev of groupe.events) {
+        if (dejaLies.has(ev.id)) continue;
+        const debut = new Date(gcDebut(ev));
+        if (isNaN(debut)) continue;
+        const existant = lecons.find(l => l.studentId === eleveId && !l.gcalEventId
+          && Math.abs(new Date(l.date) - debut) < PROXIMITE);
+        if (existant) {
+          existant.gcalEventId = ev.id;
+          await DB.put('lessons', existant);
+          dejaLies.add(ev.id);
+          lies.push(existant.id);
+          continue;
+        }
+        const fin = gcFin(ev);
+        const duree = (!gcJournee(ev) && fin)
+          ? Math.min(600, Math.max(15, Math.round((new Date(fin) - debut) / 60000))) : 60;
+        const passe = debut <= new Date();
+        const cours = {
+          id: DB.uid(), kind: 'cours', studentId: eleveId, title: '',
+          date: debut.toISOString(), duration: duree,
+          type: (/collectif|^col\b/i.test(groupe.titre) && typeCollectif) ? typeCollectif : typeParDefaut,
+          lieu: lieuDeCouleur(ev.colorId) || eleve.lieu || 'ecole',
+          status: (passe && marquerFait) ? 'done' : 'planned',
+          paid: true, fee: 0, note: ev.description || '',
+          gcalEventId: ev.id, auto: true
+        };
+        await DB.put('lessons', cours);
+        lecons.push(cours);
+        dejaLies.add(ev.id);
+        crees.push(cours.id);
+      }
+    }
+  } finally { Undo.silence = false; }
+
+  const total = crees.length + lies.length;
+  if (total || elevesCrees.length) {
+    Undo.ajouter(`rattachement de ${total} séance(s)`, async () => {
+      Undo.silence = true;
+      try {
+        for (const id of crees) await DB.del('lessons', id);
+        for (const id of lies) {
+          const l = await DB.get('lessons', id);
+          if (l) { delete l.gcalEventId; await DB.put('lessons', l); }
+        }
+        for (const id of elevesCrees) await DB.del('students', id);
+      } finally { Undo.silence = false; }
+    });
+  }
+  return { crees: crees.length, lies: lies.length, eleves: elevesCrees.length };
 }
 
 // Liste des événements Google passés non rattachés
@@ -1617,7 +1773,7 @@ async function renderHours() {
     hoursQuery = e.target.value;
     clearTimeout(hs._t); hs._t = setTimeout(() => { renderHours(); const n = $('#h-search'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 220);
   };
-  const orph = $('#orphelins'); if (orph) orph.onclick = () => sheetPastList(orphelins);
+  const orph = $('#orphelins'); if (orph) orph.onclick = () => sheetGroupes(orphelins);
   const avh = $('#a-valider-h'); if (avh) avh.onclick = () => sheetAValider(aValider);
 }
 
