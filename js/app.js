@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.9.1';
+const APP_VERSION = '3.10.1';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -20,6 +20,13 @@ function fmtHours(minutes) {
   if (!h) return m + ' min';
   return m ? `${h} h ${String(m).padStart(2, '0')}` : `${h} h`;
 }
+
+// Effets de verre et scintillement : coûteux en continu sur un téléphone.
+// Désactivés par défaut ; la classe « riche » les rétablit tous.
+function appliquerApparence() {
+  document.documentElement.classList.toggle('riche', localStorage.getItem('effets') === '1');
+}
+appliquerApparence();
 
 function toast(msg) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
@@ -73,6 +80,25 @@ function lieuDeCouleur(colorId) {
   return null;
 }
 const estCoursGoogle = ev => !!lieuDeCouleur(ev && ev.colorId);
+
+// --- Reconnaître un cours déjà rattaché ---
+// Se fier au seul identifiant Google est fragile : il change dès qu'une série
+// est modifiée ou recréée. L'app croyait alors avoir affaire à des événements
+// neufs — elle redemandait de rattacher ce qui l'était déjà, et dupliquait en
+// silence ce qu'elle savait reconnaître. Le créneau horaire, lui, ne bouge pas.
+const TOLERANCE_CRENEAU = 5;                       // minutes
+const minuteDe = d => Math.round(+new Date(d) / 60000);
+// Créneaux déjà occupés par un cours issu de Google, à la minute près.
+function creneauxGoogle(lecons) {
+  const set = new Set();
+  for (const l of lecons) if (l.gcalEventId) set.add(minuteDe(l.date));
+  return set;
+}
+function creneauPris(set, date) {
+  const m = minuteDe(date);
+  for (let d = -TOLERANCE_CRENEAU; d <= TOLERANCE_CRENEAU; d++) if (set.has(m + d)) return true;
+  return false;
+}
 // Par défaut on ne montre que les cours : les rendez-vous personnels d'un autre
 // coloris n'encombrent ni l'agenda ni la liste « à rattacher ».
 const seulementCours = () => localStorage.getItem('gc_seulement_cours') !== '0';
@@ -866,6 +892,11 @@ async function paymentStatus(student) {
 // ====== Navigation ======
 let currentTab = 'agenda';
 let currentStudent = null;   // fiche élève affichée, pour y revenir après modification
+// Avec plusieurs centaines de cours, tout afficher d'un coup crée autant de
+// cartes dans la page : le téléphone peine et chauffe. On n'en pose qu'une
+// tranche, le reste à la demande.
+let limiteFiche = 25;        // cours passés affichés dans une fiche élève
+let limiteHeures = 60;       // séances affichées dans le détail des heures
 let studentQuery = '';       // texte saisi dans la recherche d'élèves
 
 // Rafraîchit l'écran réellement affiché (et non l'onglet en général)
@@ -886,6 +917,7 @@ function switchTab(tab) {
   if (tab !== 'settings') settingsPage = null;
   if (tab !== 'students') { currentStudent = null; studentQuery = ''; }
   if (tab !== 'hours') hoursQuery = '';
+  limiteFiche = 25; limiteHeures = 60;
   currentTab = tab;
   document.querySelectorAll('.tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   const t = TABS[tab];
@@ -934,13 +966,17 @@ const sameDay = (a, b) => new Date(a).toDateString() === new Date(b).toDateStrin
 async function agendaItems() {
   const lessons = await DB.all('lessons');
   const linked = new Set(lessons.map(l => l.gcalEventId).filter(Boolean));
+  const occupes = creneauxGoogle(lessons);
   const students = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
   const items = lessons.map(l => ({
     date: l.date, lesson: l, kind: l.kind || 'cours',
     label: (students[l.studentId] ? students[l.studentId].name : (l.title || KINDS[l.kind || 'cours'].label))
   }));
   for (const e of evenementsAffichables()) {
-    if (!linked.has(e.id) && !ignores.has(e.id)) items.push({ date: gcDebut(e), gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
+    if (linked.has(e.id) || ignores.has(e.id)) continue;
+    // même créneau qu'un cours déjà rattaché : c'est le même, avec un nouvel identifiant
+    if (creneauPris(occupes, gcDebut(e))) continue;
+    items.push({ date: gcDebut(e), gcal: e, kind: 'gcal', label: e.summary || '(sans titre)' });
   }
   return items.sort((a, b) => new Date(a.date) - new Date(b.date));
 }
@@ -1188,7 +1224,8 @@ async function sheetAValider(liste) {
   const eleves = Object.fromEntries((await DB.all('students')).map(s => [s.id, s]));
   openSheet(`<h3>Cours en attente</h3>
     <div class="sub" style="margin-bottom:12px">Valide les cours qui ont bien eu lieu. Ils rejoindront les cours effectués et seront décomptés du forfait.</div>
-    ${liste.slice().reverse().map(l => `<div class="card">
+    ${liste.length > 40 ? `<div class="sub" style="margin-bottom:10px">Les 40 plus récents sont affichés. « Tout valider » porte bien sur les ${liste.length}.</div>` : ''}
+    ${liste.slice().reverse().slice(0, 40).map(l => `<div class="card">
       <div class="row"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div>
       <div class="grow"><div class="title">${esc(eleves[l.studentId] ? eleves[l.studentId].name : (l.title || KINDS[l.kind || 'cours'].label))}</div>
       <div class="sub">${esc(l.type || '')} · ${fmtHours(l.duration || 60)}</div></div></div>
@@ -1321,12 +1358,13 @@ async function rattacherGroupes(choix, marquerFait, courseTypes) {
         if (dejaLies.has(ev.id)) continue;
         const debut = new Date(gcDebut(ev));
         if (isNaN(debut)) continue;
-        const existant = lecons.find(l => l.studentId === eleveId && !l.gcalEventId
+        const existant = lecons.find(l => l.studentId === eleveId
           && Math.abs(new Date(l.date) - debut) < PROXIMITE);
         if (existant) {
+          dejaLies.add(ev.id);
+          if (existant.gcalEventId === ev.id) continue;
           existant.gcalEventId = ev.id;
           await DB.put('lessons', existant);
-          dejaLies.add(ev.id);
           lies.push(existant.id);
           continue;
         }
@@ -1420,9 +1458,10 @@ async function rattacherAuto() {
   // Un cours déjà saisi à la main pour cet élève, au même moment, ne doit pas être
   // dupliqué : on se contente de lui accrocher l'identifiant de l'événement Google.
   const PROXIMITE = 120 * 60000;
+  // On ne réclame plus l'absence d'identifiant Google : un cours déjà rattaché
+  // dont l'événement a changé d'identifiant doit être RÉUTILISÉ, pas dupliqué.
   const dejaPresent = (eleveId, debut) => lecons.find(l =>
-    l.studentId === eleveId && !l.gcalEventId &&
-    Math.abs(new Date(l.date) - debut) < PROXIMITE);
+    l.studentId === eleveId && Math.abs(new Date(l.date) - debut) < PROXIMITE);
 
   const crees = [], lies = [];
   Undo.silence = true;
@@ -1443,9 +1482,10 @@ async function rattacherAuto() {
 
       const existant = dejaPresent(eleve.id, debut);
       if (existant) {                                    // rapprochement, pas de doublon
-        existant.gcalEventId = ev.id;
-        await DB.put('lessons', existant);
         dejaLies.add(ev.id);
+        if (existant.gcalEventId === ev.id) continue;    // rien à changer
+        existant.gcalEventId = ev.id;                    // identifiant renouvelé côté Google
+        await DB.put('lessons', existant);
         lies.push(existant.id);
         continue;
       }
@@ -1724,9 +1764,12 @@ async function renderHours() {
       <div class="sub">Non comptée${aValider.length > 1 ? 's' : ''} dans les statistiques tant qu\u2019elle${aValider.length > 1 ? 's ne sont' : ' n\u2019est'} pas confirmée${aValider.length > 1 ? 's' : ''}.</div></div>`;
 
   // les événements Google non rattachés ne sont comptés nulle part : on le signale
-  const lies = new Set((await DB.all('lessons')).map(l => l.gcalEventId).filter(Boolean));
+  const toutesLecons = await DB.all('lessons');
+  const lies = new Set(toutesLecons.map(l => l.gcalEventId).filter(Boolean));
+  const occupesH = creneauxGoogle(toutesLecons);
   const bornes = hoursRange === 'week' ? startWeek : hoursRange === 'month' ? startMonth : new Date(0);
   const orphelins = evenementsAffichables().filter(e => !lies.has(e.id) && !ignores.has(e.id)
+    && !creneauPris(occupesH, gcDebut(e))
     && new Date(gcDebut(e)) <= now && new Date(gcDebut(e)) >= bornes);
   if (orphelins.length) html += `<div class="card accent tappable" id="orphelins">
       <div class="title">📥 ${orphelins.length} événement${orphelins.length > 1 ? 's' : ''} Google non rattaché${orphelins.length > 1 ? 's' : ''}</div>
@@ -1751,7 +1794,7 @@ async function renderHours() {
     html += `<h2 class="section">Détail (${vus.length})</h2>`;
     if (mots.length) html += `<div class="search-count">${fmtHours(totalVus)} sur ${fmtHours(mins(inRange))} pour la période</div>`;
     let curDay = '';
-    for (const l of vus) {
+    for (const l of vus.slice(0, limiteHeures)) {
       const key = new Date(l.date).toDateString();
       if (key !== curDay) { curDay = key; html += `<div class="day-head">${fmtDate(l.date)}</div>`; }
       const k = KINDS[l.kind || 'cours'];
@@ -1763,16 +1806,20 @@ async function renderHours() {
         <div class="sub">${fmtHours(l.duration || 60)}${l.fee ? ' · ' + fmtMoney(l.fee) : ''}${l.paid === false ? ' · offert' : ''}</div></div>
         <div class="chev">›</div></div></div>`;
     }
+    if (vus.length > limiteHeures)
+      html += `<button class="btn ghost" id="plus-heures">Afficher les ${vus.length - limiteHeures} séances suivantes</button>`;
   }
   view.innerHTML = html;
-  view.querySelectorAll('[data-range]').forEach(b => b.onclick = () => { hoursRange = b.dataset.range; renderHours(); });
+  view.querySelectorAll('[data-range]').forEach(b => b.onclick = () => { hoursRange = b.dataset.range; limiteHeures = 60; renderHours(); });
   activerGlissement(view);
   $('#add-act').onclick = () => sheetLesson(null, null, 'repetition');
   const hs = $('#h-search');
   if (hs) hs.oninput = e => {
-    hoursQuery = e.target.value;
+    hoursQuery = e.target.value; limiteHeures = 60;
     clearTimeout(hs._t); hs._t = setTimeout(() => { renderHours(); const n = $('#h-search'); if (n) { n.focus(); n.setSelectionRange(n.value.length, n.value.length); } }, 220);
   };
+  const plusH = $('#plus-heures');
+  if (plusH) plusH.onclick = () => { limiteHeures += 150; renderHours(); };
   const orph = $('#orphelins'); if (orph) orph.onclick = () => sheetGroupes(orphelins);
   const avh = $('#a-valider-h'); if (avh) avh.onclick = () => sheetAValider(aValider);
 }
@@ -1830,6 +1877,7 @@ async function renderStudents() {
 async function renderStudentDetail(id) {
   const s = await DB.get('students', id);
   if (!s) return renderStudents();
+  if (currentStudent !== id) limiteFiche = 25;      // nouvelle fiche : on repart court
   currentStudent = id;
   const allItems = await lessonsOf(id);
   const lessons = allItems.filter(l => (l.kind || 'cours') === 'cours');
@@ -1890,7 +1938,9 @@ async function renderStudentDetail(id) {
 
     ${attente.length ? `<h2 class="section">Cours en attente (${attente.length})</h2>
     <div class="sub" style="margin-bottom:10px">Ces cours sont passés mais pas encore confirmés. Ils ne décomptent rien du forfait tant qu\u2019ils ne sont pas validés.</div>
-    ${attente.map(l => `<div class="card accent">
+    ${attente.length > 1 ? `<button class="btn gold" id="valider-tout" style="margin-top:0">✓ Valider les ${attente.length} cours en attente</button>` : ''}
+    ${attente.length > 20 ? `<div class="sub" style="margin-bottom:10px">Les 20 plus récents sont détaillés ci-dessous.</div>` : ''}
+    ${attente.slice(0, 20).map(l => `<div class="card accent">
         <div class="row"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div>
         <div class="grow"><div class="title">${esc(l.type || '')}</div>
         <div class="sub">${fmtHours(l.duration || 60)}${l.lieu === 'domicile' ? ' · à domicile' : ''}</div></div></div>
@@ -1904,7 +1954,7 @@ async function renderStudentDetail(id) {
     ${next.map(l => `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div><div class="grow sub">${esc(l.type || '')}</div><div class="chev">›</div></div>`).join('') || '<div class="sub" style="padding:6px">Aucun cours planifié.</div>'}
 
     <h2 class="section">Cours individuels effectués (${past.length})</h2>
-    ${past.map(l => {
+    ${past.slice(0, limiteFiche).map(l => {
       const paye = couverture[l.id];
       const pastille = l.paid === false ? '<span class="paye offert" title="Cours offert">✦</span>'
         : paye ? '<span class="paye oui" title="Payé">✓</span>'
@@ -1913,6 +1963,7 @@ async function renderStudentDetail(id) {
       <div class="grow sub">${esc(l.type || '')}${l.lieu === 'domicile' ? ' · à domicile' : ''}${l.note ? ' — ' + esc(l.note) : ''}</div>
       ${pastille}</div>`;
     }).join('') || '<div class="sub" style="padding:6px">Aucun cours passé.</div>'}
+    ${past.length > limiteFiche ? `<button class="btn ghost" id="plus-cours">Afficher les ${past.length - limiteFiche} cours précédents</button>` : ''}
 
     <h2 class="section">Cours collectifs (${collectifs.length})</h2>
     <div class="sub" style="margin-bottom:10px">Les cours collectifs ont toujours lieu à l\u2019école et ne décomptent rien du forfait individuel.
@@ -1928,12 +1979,32 @@ async function renderStudentDetail(id) {
     ${!collectifs.length ? '<div class="sub" style="padding:6px">Aucun cours collectif pour cet élève.</div>' : ''}
   `;
   $('#back').onclick = renderStudents;
+  const plusCours = $('#plus-cours');
+  if (plusCours) plusCours.onclick = () => { limiteFiche += 100; renderStudentDetail(id); };
   $('#edit-student').onclick = () => sheetStudent(id);
   $('#add-lesson').onclick = () => sheetLesson(null, id);
   $('#add-coll').onclick = () => sheetLesson(null, id, null, 'collectif');
   $('#add-pay').onclick = () => sheetPayment(id);
   $('#add-note').onclick = () => sheetNote(id);
   view.querySelectorAll('[data-note]').forEach(el => el.onclick = () => sheetNote(id, el.dataset.note));
+  const vTout = $('#valider-tout');
+  if (vTout) vTout.onclick = async () => {
+    if (!confirm(`Valider les ${attente.length} cours en attente de ${s.name} ?\n\nIls compteront alors dans les heures effectuées et décompteront le forfait.`)) return;
+    vTout.disabled = true; vTout.textContent = 'Validation…';
+    // Un seul geste à annuler, pas une entrée par cours.
+    Undo.silence = true;
+    try {
+      for (const l of attente) { const x = await DB.get('lessons', l.id); if (x) { x.status = 'done'; await DB.put('lessons', x); } }
+    } finally { Undo.silence = false; }
+    const ids = attente.map(l => l.id);
+    Undo.ajouter(`validation de ${ids.length} cours`, async () => {
+      Undo.silence = true;
+      try { for (const id of ids) { const x = await DB.get('lessons', id); if (x) { x.status = 'planned'; await DB.put('lessons', x); } } }
+      finally { Undo.silence = false; }
+    });
+    toast(ids.length + ' cours validés ✓');
+    renderStudentDetail(id);
+  };
   view.querySelectorAll('[data-valider]').forEach(b => b.onclick = async () => {
     const l = await DB.get('lessons', b.dataset.valider);
     l.status = 'done'; await DB.put('lessons', l);
@@ -2358,6 +2429,7 @@ async function renderSettings() {
   if (settingsPage === 'tarifs') return settingsTarifs();
   if (settingsPage === 'google') return settingsGoogle();
   if (settingsPage === 'data') return settingsData();
+  if (settingsPage === 'apparence') return settingsApparence();
   if (settingsPage === 'securite') return settingsSecurite();
   if (settingsPage === 'apropos') return settingsApropos();
 
@@ -2366,6 +2438,7 @@ async function renderSettings() {
     ['tarifs', '💶', 'Cours, forfaits & encaissement', 'Types de cours, tarifs, qui encaisse'],
     ['google', '📅', 'Google Agenda', GC.aReconnecter ? '⚠️ Autorisation expirée — reconnecter' : GC.connected ? 'Connecté' : 'Non connecté'],
     ['data', '☁️', 'Données & sauvegarde', Cloud.lastBackup ? 'Dernière sauvegarde : ' + new Date(Cloud.lastBackup).toLocaleString('fr-FR') : 'Sauvegarde cloud à configurer'],
+    ['apparence', '🎨', 'Apparence', localStorage.getItem('effets') === '1' ? 'Effets complets' : 'Mode léger (batterie)'],
     ['securite', '🔒', 'Sécurité', Lock.enabled ? 'Code actif' : 'Aucun code'],
     ['apropos', 'ℹ️', 'À propos', 'Version ' + APP_VERSION]
   ];
@@ -2522,6 +2595,24 @@ async function settingsGoogle() {
   };
 }
 
+// --- Apparence ---
+async function settingsApparence() {
+  const riche = localStorage.getItem('effets') === '1';
+  view.innerHTML = settingsBack('Apparence') + `<div class="card">
+      <label class="switch"><input type="checkbox" id="ap-effets" ${riche ? 'checked' : ''}>
+        <span class="track"></span>
+        <span class="lbl">Effets de verre et scintillement<small>Flou derrière chaque carte et paillettes animées en continu. Très joli, mais le téléphone chauffe et la batterie descend plus vite, même quand tu ne fais que lire.</small></span></label>
+      <div class="sub" style="margin-top:10px">En mode léger, le flou est conservé sur la barre du haut, la barre d\u2019onglets et les fenêtres : l\u2019aspect général ne change presque pas.</div>
+    </div>`;
+  bindBack();
+  $('#ap-effets').onchange = e => {
+    localStorage.setItem('effets', e.target.checked ? '1' : '0');
+    appliquerApparence();
+    toast(e.target.checked ? 'Effets complets ✓' : 'Mode léger ✓');
+    renderSettings();
+  };
+}
+
 // --- Sécurité ---
 async function settingsSecurite() {
   const delays = [[0, 'Immédiat'], [60000, '1 minute'], [300000, '5 minutes'], [900000, '15 minutes'], [3600000, '1 heure'], [-1, 'Jamais']];
@@ -2601,6 +2692,13 @@ async function settingsData() {
     <h2 class="section">Historique cloud</h2>
     <div class="card" id="hist-box"><div class="sub">Chargement…</div></div>
 
+    <h2 class="section">Entretien</h2>
+    <div class="card">
+      <div class="sub">Un cours enregistré deux fois fausse les heures effectuées et le décompte des forfaits. Deux séances du même élève sur le même créneau sont forcément la même.</div>
+      <button class="btn secondary" id="dbl-check">🧹 Chercher les doublons</button>
+      <div id="dbl-res"></div>
+    </div>
+
     <h2 class="section">Fichier de sauvegarde</h2>
     <div class="card">
       <button class="btn secondary" id="bk-export">Exporter (JSON)</button>
@@ -2674,6 +2772,30 @@ async function settingsData() {
     } catch (e) { toast('Lecture impossible'); }
     renderSettings();
   };
+  const dbl = $('#dbl-check');
+  if (dbl) dbl.onclick = async () => {
+    dbl.disabled = true; dbl.textContent = 'Analyse…';
+    const lots = await trouverDoublons();
+    const enTrop = lots.reduce((n, l) => n + l.length - 1, 0);
+    const boite = $('#dbl-res');
+    if (!enTrop) {
+      boite.innerHTML = '<div class="sub" style="margin-top:10px">✅ Aucun doublon.</div>';
+      dbl.disabled = false; dbl.textContent = '🧹 Chercher les doublons';
+      return;
+    }
+    const eleves = Object.fromEntries((await DB.all('students')).map(e => [e.id, e.name]));
+    boite.innerHTML = `<div class="sub" style="margin-top:10px;color:var(--danger)">⚠️ ${enTrop} séance(s) en double sur ${lots.length} créneau(x).</div>`
+      + lots.slice(0, 5).map(l => `<div class="sub">· ${esc(eleves[l[0].studentId] || l[0].title || 'séance')} — ${fmtDateFull(l[0].date)} ${fmtTime(l[0].date)} (${l.length}×)</div>`).join('')
+      + (lots.length > 5 ? `<div class="sub">· … et ${lots.length - 5} autre(s)</div>` : '')
+      + `<button class="btn danger" id="dbl-go">Fusionner les ${enTrop} doublon(s)</button>`;
+    $('#dbl-go').onclick = async () => {
+      if (!confirm(`Fusionner ${enTrop} séance(s) en double ?\n\nLa plus complète est conservée (validée de préférence, avec sa note et son lien Google). Annulable avec ↺.`)) return;
+      const n = await fusionnerDoublons(lots);
+      toast(n + ' doublon(s) fusionné(s) ✓');
+      renderSettings();
+    };
+    dbl.disabled = false; dbl.textContent = '🧹 Chercher les doublons';
+  };
   $('#bk-export').onclick = async () => {
     const blob = new Blob([JSON.stringify(await DB.exportAll())], { type: 'application/json' });
     const a = document.createElement('a');
@@ -2704,6 +2826,72 @@ async function etatWorker() {
       <div class="sub">${w.joignable
         ? 'Les sauvegardes fonctionnent. Pour retrouver le forçage d\u2019envoi et l\u2019historique daté, recolle <b>worker/worker.js</b> dans Cloudflare → <b>Deploy</b>.'
         : esc(w.raison || '') + ' — vérifie WORKER_URL dans js/config.js et ALLOWED_ORIGIN côté worker.'}</div></div>`;
+}
+
+// ---- Doublons de séances -----------------------------------------------
+// Un même cours a pu être enregistré deux fois si l'événement Google a changé
+// d'identifiant entre deux synchros. Deux séances du même élève sur le même
+// créneau sont forcément la même.
+async function trouverDoublons() {
+  const lecons = await DB.all('lessons');
+  const paquets = new Map();
+  for (const l of lecons) {
+    const k = (l.studentId || l.title || '?') + '|' + (l.kind || 'cours');
+    if (!paquets.has(k)) paquets.set(k, []);
+    paquets.get(k).push(l);
+  }
+  const lots = [];
+  for (const groupe of paquets.values()) {
+    groupe.sort((a, b) => new Date(a.date) - new Date(b.date));
+    let lot = [groupe[0]];
+    for (let i = 1; i < groupe.length; i++) {
+      if (Math.abs(new Date(groupe[i].date) - new Date(lot[0].date)) < TOLERANCE_CRENEAU * 60000) lot.push(groupe[i]);
+      else { if (lot.length > 1) lots.push(lot); lot = [groupe[i]]; }
+    }
+    if (lot.length > 1) lots.push(lot);
+  }
+  return lots;
+}
+
+// On garde la séance la plus « riche » : validée de préférence, puis celle qui
+// porte un identifiant Google, puis celle qui a une note.
+function meilleureSeance(lot) {
+  return lot.slice().sort((a, b) =>
+    (estValide(b) - estValide(a))
+    || ((b.gcalEventId ? 1 : 0) - (a.gcalEventId ? 1 : 0))
+    || ((b.note || '').length - (a.note || '').length)
+  )[0];
+}
+
+async function fusionnerDoublons(lots) {
+  const supprimes = [];
+  Undo.silence = true;
+  try {
+    for (const lot of lots) {
+      const garde = meilleureSeance(lot);
+      // on ne perd ni l'identifiant Google ni la note au passage
+      let modifie = false;
+      for (const l of lot) {
+        if (l.id === garde.id) continue;
+        if (!garde.gcalEventId && l.gcalEventId) { garde.gcalEventId = l.gcalEventId; modifie = true; }
+        if (!garde.note && l.note) { garde.note = l.note; modifie = true; }
+      }
+      if (modifie) await DB.put('lessons', garde);
+      for (const l of lot) {
+        if (l.id === garde.id) continue;
+        supprimes.push(l);
+        await DB.del('lessons', l.id);
+      }
+    }
+  } finally { Undo.silence = false; }
+  if (supprimes.length) {
+    Undo.ajouter(`fusion de ${supprimes.length} doublon(s)`, async () => {
+      Undo.silence = true;
+      try { for (const l of supprimes) await DB.put('lessons', l); }
+      finally { Undo.silence = false; }
+    });
+  }
+  return supprimes.length;
 }
 
 // Les 6 dernières versions conservées dans le cloud

@@ -534,3 +534,43 @@ main > .sub{
 .paye.non{
   background:transparent;border:1.5px dashed rgba(228,121,95,.5);
 }
+
+/* ===== Mode léger (par défaut) =====
+   Deux choses faisaient chauffer le téléphone en continu, même à l'arrêt :
+   - les deux calques de paillettes plein écran animés en boucle infinie, qui
+     forcent le recalcul de tout l'écran à chaque image ;
+   - backdrop-filter sur des éléments RÉPÉTÉS : une liste de 250 cours = 250
+     flous à recalculer par image, au-dessus d'un fond qui bouge.
+   On garde le flou là où il n'y a qu'un seul élément (barres, feuille, toast) :
+   c'est lui qui donne son caractère à l'interface, et il ne coûte presque rien.
+   Réglages → Apparence rétablit l'ensemble pour qui préfère le rendu complet. */
+html:not(.riche) body::before,
+html:not(.riche) body::after{animation:none}
+
+html:not(.riche) .card,
+html:not(.riche) .stat,
+html:not(.riche) .cal-nav,
+html:not(.riche) .cal-grid,
+html:not(.riche) .cat,
+html:not(.riche) .seg,
+html:not(.riche) .day-head,
+html:not(.riche) h2.section,
+html:not(.riche) .search-count,
+html:not(.riche) .empty,
+html:not(.riche) .week-head,
+html:not(.riche) .week-empty,
+html:not(.riche) main > .sub,
+html:not(.riche) .btn.secondary,
+html:not(.riche) .btn.danger,
+html:not(.riche) .btn.ghost{
+  backdrop-filter:none;-webkit-backdrop-filter:none;
+}
+/* Sans le flou, le fond translucide manque de corps : on le densifie un peu
+   pour que les cartes se détachent autant qu'avant. */
+html:not(.riche) .card{background:rgba(34,92,63,.62)}
+html:not(.riche) .cat,
+html:not(.riche) .stat,
+html:not(.riche) .empty,
+html:not(.riche) .cal-grid,
+html:not(.riche) .week-head{background:rgba(34,92,63,.55)}
+html:not(.riche) .btn.secondary{background:rgba(34,92,63,.6)}

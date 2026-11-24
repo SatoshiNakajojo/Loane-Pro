@@ -109,6 +109,7 @@ La synchro nécessite deux choses : des identifiants Google (gratuits) et un Wor
 - Si un cours a déjà été saisi à la main au même moment pour cet élève, l'app ne crée pas de doublon : elle rapproche les deux.
 - Ne restent donc « à rattacher » que les événements que l'app ne peut pas décider seule : **nouveaux élèves**, **homonymes de prénom**, ou séances qui ne sont pas des cours.
 - Le rattachement automatique s'annule **en un seul geste** avec le bouton ↺, quel que soit le nombre de cours concernés.
+- Un cours déjà rattaché n'est **jamais reproposé ni dupliqué**, même si Google change l'identifiant de l'événement (ce qui arrive quand une série est modifiée ou recréée). L'app se repère au **créneau horaire**, pas seulement à l'identifiant.
 - Pour le reste, la carte « **N événements passés à rattacher** » ouvre un écran qui **regroupe les événements par intitulé** : « Cecile » revient 30 fois, on choisit l'élève une seule fois et les 30 suivent. On peut y créer l'élève à la volée, ou ignorer tout un intitulé d'un coup (les événements restent intacts dans Google Agenda). Indispensable quand l'agenda contient des centaines de séances.
 - Un glissement vers la gauche permet d'**ignorer** un événement (il reste intact dans Google Agenda).
 - La synchro a lieu à l'ouverture de l'app, au retour au premier plan (au plus une fois par heure) et via le bouton **🔄 Synchroniser**. Les événements de la dernière synchro sont conservés sur l'appareil : l'agenda reste complet même hors ligne.
@@ -159,6 +160,12 @@ Une sauvegarde ne contient que ce qui **existe**. Sans précaution, un élève s
 | **Restaurer un fichier JSON** | Comme une version de l'historique : tout est remis en place, rien n'est effacé. |
 
 Les marques de suppression sont purgées au bout de 6 mois.
+
+## Doublons
+
+Deux séances du même élève sur le même créneau sont forcément la même. **Réglages → Données & sauvegarde → 🧹 Chercher les doublons** les repère et les fusionne : la plus complète est conservée (validée de préférence, avec sa note et son lien Google), et l'opération s'annule d'un seul ↺.
+
+À utiliser si les heures effectuées ou le décompte des forfaits paraissent gonflés.
 
 ## En cas de problème
 
