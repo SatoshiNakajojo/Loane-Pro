@@ -132,6 +132,18 @@ Quand tu enregistres un paiement sur le profil d'un élève, tu indiques **combi
 - tant qu'il reste des cours payés → badge vert « X cours restants » ;
 - dès que le forfait est épuisé → badge rouge **« À encaisser »** dans la liste des élèves.
 
+## Départ de validité d'un paiement
+
+Chaque paiement porte un « départ validité », qui dit **à partir de quand il s'applique** :
+
+| Choix | Effet |
+|---|---|
+| **1er cours** | La validité démarre au 1er cours qui suit le paiement. Celui-ci ne couvre que les cours postérieurs à sa date. |
+| **date d'achat** | La validité démarre à la date du paiement. Même limite : seuls les cours postérieurs sont couverts. Pour les bons cadeaux. |
+| **1er cours impayé** | Le paiement **rattrape les cours déjà donnés et non réglés**, du plus ancien au plus récent, et la validité démarre au premier d'entre eux. |
+
+Le troisième choix répond au cas courant : un chèque encaissé aujourd'hui pour des cours donnés il y a deux mois. Sans lui, le paiement ne couvrait aucun de ces cours — ils restaient marqués « reste dû » sur la fiche de l'élève.
+
 ## Sauvegarde cloud ☁️ — comment ça marche
 
 Une fois le worker déployé avec le stockage KV (étape 3b-6) et `WORKER_URL` renseigné dans `js/config.js` :

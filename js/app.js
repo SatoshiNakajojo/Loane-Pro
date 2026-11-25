@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.10.2';
+const APP_VERSION = '3.11.0';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -843,19 +843,35 @@ async function coverageMap(student, inclureAttente) {
   const seances = (await lessonsOf(student.id))
     .filter(l => (l.kind || 'cours') === 'cours' && l.paid !== false && !estCollectif(l) && retenu(l))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
-  const payments = (await DB.byStudent('payments', student.id)).sort((a, b) => new Date(a.date) - new Date(b.date));
+  const tous = (await DB.byStudent('payments', student.id)).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+  // Un paiement ordinaire ne couvre que les cours POSTÉRIEURS à sa date : un
+  // chèque encaissé aujourd'hui ne rattrapait donc jamais les cours déjà
+  // donnés et non réglés. Les paiements marqués « 1er cours impayé » servent
+  // précisément à cela : ils ne s'appliquent pas à leur date, mais au plus
+  // ancien cours encore découvert.
+  const chrono = tous.filter(p => p.validityFrom !== 'unpaid');
+  const rattrapage = tous.filter(p => p.validityFrom === 'unpaid');
+
   const map = {};
-  let credit = 0, ip = 0;
+  const premierCouvert = {};        // paiement de rattrapage → date du 1er cours couvert
+  let credit = 0, ip = 0, ir = 0;
   for (const l of seances) {
-    // on ajoute au crédit tous les paiements intervenus jusqu'à ce cours
-    while (ip < payments.length && new Date(payments[ip].date) <= new Date(l.date)) {
-      credit += paiementMinutes(payments[ip]); ip++;
+    while (ip < chrono.length && new Date(chrono[ip].date) <= new Date(l.date)) {
+      credit += paiementMinutes(chrono[ip]); ip++;
     }
     const besoin = l.duration || 60;
+    while (credit < besoin && ir < rattrapage.length) {
+      if (!premierCouvert[rattrapage[ir].id]) premierCouvert[rattrapage[ir].id] = l.date;
+      credit += paiementMinutes(rattrapage[ir]); ir++;
+    }
     if (credit >= besoin) { map[l.id] = true; credit -= besoin; }
-    else { map[l.id] = false; }
+    else map[l.id] = false;
   }
-  return map;
+  // ce qui n'a pas encore servi reste disponible
+  while (ir < rattrapage.length) { credit += paiementMinutes(rattrapage[ir]); ir++; }
+  while (ip < chrono.length) { credit += paiementMinutes(chrono[ip]); ip++; }
+  return { map, credit, premierCouvert };
 }
 
 async function paymentStatus(student) {
@@ -876,13 +892,25 @@ async function paymentStatus(student) {
     return { last: null, due: dus > 0, remainingMin: -dus, expiry: null, expired: false, aucuneActivite };
   }
 
-  const consomme = faits.filter(l => new Date(l.date) > new Date(last.date)).reduce((a, l) => a + dureeTotale(l), 0);
-  const remainingMin = paiementMinutes(last) - consomme;
+  // Un paiement de rattrapage couvre des cours ANTÉRIEURS à sa date : le solde
+  // ne peut pas se déduire des seuls cours qui le suivent. On s'appuie alors
+  // sur la répartition réelle, qui fait foi.
+  const rattrapage = last.validityFrom === 'unpaid';
+  let remainingMin, premierCouvert = null;
+  if (rattrapage) {
+    const c = await coverageMap(student);
+    remainingMin = c.credit;
+    premierCouvert = c.premierCouvert[last.id] || null;
+  } else {
+    const consomme = faits.filter(l => new Date(l.date) > new Date(last.date)).reduce((a, l) => a + dureeTotale(l), 0);
+    remainingMin = paiementMinutes(last) - consomme;
+  }
 
   let expiry = null;
   const mois = last.validityMonths || 0;
   if (mois) {
     if (last.validityFrom === 'purchase') expiry = addMonths(last.date, mois);
+    else if (rattrapage) expiry = addMonths(premierCouvert || last.date, mois);
     else {
       const premier = decomptables.find(l => new Date(l.date) > new Date(last.date));
       expiry = premier ? addMonths(premier.date, mois) : null;
@@ -1895,10 +1923,10 @@ async function renderStudentDetail(id) {
   const payments = (await DB.byStudent('payments', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const notes = (await DB.byStudent('notes', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const st = await paymentStatus(s);
-  const couverture = await coverageMap(s);
+  const couverture = (await coverageMap(s)).map;
   // Les cours rattachés depuis Google arrivent « en attente » : sans cette
   // seconde carte, la fiche d'un élève n'affichait plus aucune pastille.
-  const couvertureAttente = await coverageMap(s, true);
+  const couvertureAttente = (await coverageMap(s, true)).map;
   const totalMin = lessons.filter(l => new Date(l.date) <= now).reduce((a, l) => a + (l.duration || 60), 0);
   const collMin = collPast.reduce((a, l) => a + (l.duration || 60), 0);
 
@@ -2118,10 +2146,12 @@ async function sheetPayment(studentId, payId) {
       <label class="field"><span>Validité (mois)</span><input type="number" id="f-valid" value="${p ? (p.validityMonths || 0) : (f0.validity || 2)}"></label>
       <label class="field"><span>Départ validité</span>
         <select id="f-from">
-          <option value="first" ${!p || p.validityFrom !== 'purchase' ? 'selected' : ''}>1er cours</option>
+          <option value="first" ${!p || !['purchase', 'unpaid'].includes(p.validityFrom) ? 'selected' : ''}>1er cours</option>
           <option value="purchase" ${p && p.validityFrom === 'purchase' ? 'selected' : ''}>date d\u2019achat</option>
+          <option value="unpaid" ${p && p.validityFrom === 'unpaid' ? 'selected' : ''}>1er cours impayé</option>
         </select></label>
     </div>
+    <div class="sub" id="from-aide" style="margin:-6px 0 12px"></div>
     <div class="field-row">
       <label class="field"><span>Date</span><input type="date" id="f-date" value="${d.toISOString().slice(0, 10)}"></label>
       <label class="field"><span>Moyen</span>
@@ -2133,11 +2163,22 @@ async function sheetPayment(studentId, payId) {
     ${p ? '<button class="btn danger" id="f-del">Supprimer ce paiement</button>' : ''}
   `);
 
+  // La portée de chaque choix n'est pas devinable : on l'écrit sous le champ.
+  const AIDE_FROM = {
+    first: 'La validité démarre au 1er cours qui suit ce paiement. Il ne couvre que les cours postérieurs à sa date.',
+    purchase: 'La validité démarre à la date ci-dessous. Le paiement ne couvre que les cours postérieurs à cette date.',
+    unpaid: 'Le paiement rattrape les cours déjà donnés et non réglés, du plus ancien au plus récent. La validité démarre au premier d\u2019entre eux.'
+  };
+  const majAide = () => { const b = $('#from-aide'); if (b) b.textContent = AIDE_FROM[$('#f-from').value] || ''; };
+  $('#f-from').onchange = majAide;
+  majAide();
+
   $('#f-forfait').onchange = e => {
     const f = forfaits[+e.target.value];
     if (!f) return;
     $('#f-amount').value = f.price; $('#f-count').value = forfaitHeures(f);
     $('#f-valid').value = f.validity || 0; $('#f-from').value = f.from || 'first';
+    majAide();
   };
 
   $('#f-save').onclick = async () => {
@@ -3017,7 +3058,7 @@ async function drawForfaits() {
   const box = $('#forfaits-box'); if (!box) return;
   box.innerHTML = forfaits.map((f, i) => `<div class="editrow">
       <div class="grow"><div class="title">${esc(f.label)}</div>
-        <div class="sub">${forfaitHeures(f)} h · ${fmtMoney(f.price)}${f.validity ? ' · valable ' + f.validity + ' mois ' + (f.from === 'purchase' ? 'dès l\u2019achat' : 'dès le 1er cours') : ''}</div></div>
+        <div class="sub">${forfaitHeures(f)} h · ${fmtMoney(f.price)}${f.validity ? ' · valable ' + f.validity + ' mois ' + (f.from === 'purchase' ? 'dès l\u2019achat' : f.from === 'unpaid' ? 'dès le 1er cours impayé' : 'dès le 1er cours') : ''}</div></div>
       <button class="icon-btn edit" data-edit-f="${i}" title="Modifier">✎</button>
       <button class="icon-btn" data-del-f="${i}" title="Supprimer">✕</button></div>`).join('')
     + `<button class="btn secondary" id="add-forfait">＋ Ajouter un forfait</button>
@@ -3051,8 +3092,9 @@ async function sheetForfait(index) {
       <label class="field"><span>Validité (mois)</span><input type="number" id="ff-valid" value="${f.validity || 0}"></label>
       <label class="field"><span>Départ validité</span>
         <select id="ff-from">
-          <option value="first" ${f.from !== 'purchase' ? 'selected' : ''}>1er cours</option>
+          <option value="first" ${!['purchase', 'unpaid'].includes(f.from) ? 'selected' : ''}>1er cours</option>
           <option value="purchase" ${f.from === 'purchase' ? 'selected' : ''}>date d\u2019achat</option>
+          <option value="unpaid" ${f.from === 'unpaid' ? 'selected' : ''}>1er cours impayé</option>
         </select></label>
     </div>
     <button class="btn" id="ff-save">Enregistrer</button>
