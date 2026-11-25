@@ -574,3 +574,7 @@ html:not(.riche) .empty,
 html:not(.riche) .cal-grid,
 html:not(.riche) .week-head{background:rgba(34,92,63,.55)}
 html:not(.riche) .btn.secondary{background:rgba(34,92,63,.6)}
+
+/* Pastille d'un cours encore à valider : même code couleur, atténué, car la
+   couverture n'est que prévisionnelle tant que le cours n'est pas confirmé. */
+.paye.provisoire{opacity:.6}

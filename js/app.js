@@ -1,5 +1,5 @@
 // ====== Loane Pro ======
-const APP_VERSION = '3.10.1';
+const APP_VERSION = '3.10.2';
 
 const $ = sel => document.querySelector(sel);
 const view = $('#view');
@@ -836,9 +836,12 @@ function addMonths(d, m) { const x = new Date(d); x.setMonth(x.getMonth() + m); 
 // État des paiements + validité des forfaits
 // Marque chaque cours décomptable comme payé ou non, dans l'ordre chronologique.
 // Chaque paiement crédite un capital d'heures que les cours suivants consomment.
-async function coverageMap(student) {
+// inclureAttente : prend aussi en compte les cours passés non encore validés,
+// pour pouvoir afficher leur couverture à titre prévisionnel dans la fiche.
+async function coverageMap(student, inclureAttente) {
+  const retenu = l => inclureAttente ? (estValide(l) || enAttente(l)) : estValide(l);
   const seances = (await lessonsOf(student.id))
-    .filter(l => (l.kind || 'cours') === 'cours' && l.paid !== false && !estCollectif(l) && estValide(l))
+    .filter(l => (l.kind || 'cours') === 'cours' && l.paid !== false && !estCollectif(l) && retenu(l))
     .sort((a, b) => new Date(a.date) - new Date(b.date));
   const payments = (await DB.byStudent('payments', student.id)).sort((a, b) => new Date(a.date) - new Date(b.date));
   const map = {};
@@ -1893,6 +1896,9 @@ async function renderStudentDetail(id) {
   const notes = (await DB.byStudent('notes', id)).sort((a, b) => new Date(b.date) - new Date(a.date));
   const st = await paymentStatus(s);
   const couverture = await coverageMap(s);
+  // Les cours rattachés depuis Google arrivent « en attente » : sans cette
+  // seconde carte, la fiche d'un élève n'affichait plus aucune pastille.
+  const couvertureAttente = await coverageMap(s, true);
   const totalMin = lessons.filter(l => new Date(l.date) <= now).reduce((a, l) => a + (l.duration || 60), 0);
   const collMin = collPast.reduce((a, l) => a + (l.duration || 60), 0);
 
@@ -1943,7 +1949,8 @@ async function renderStudentDetail(id) {
     ${attente.slice(0, 20).map(l => `<div class="card accent">
         <div class="row"><div class="lesson-time">${fmtDate(l.date)}<br><span class="sub">${fmtTime(l.date)}</span></div>
         <div class="grow"><div class="title">${esc(l.type || '')}</div>
-        <div class="sub">${fmtHours(l.duration || 60)}${l.lieu === 'domicile' ? ' · à domicile' : ''}</div></div></div>
+        <div class="sub">${fmtHours(l.duration || 60)}${l.lieu === 'domicile' ? ' · à domicile' : ''}</div></div>
+        ${pastillePaiement(l, couvertureAttente[l.id], true)}</div>
         <div class="field-row" style="margin-top:10px">
           <button class="btn gold" style="margin:0" data-valider="${l.id}">✓ Valider</button>
           <button class="btn secondary" style="margin:0" data-modifier="${l.id}">Modifier</button>
@@ -1955,10 +1962,7 @@ async function renderStudentDetail(id) {
 
     <h2 class="section">Cours individuels effectués (${past.length})</h2>
     ${past.slice(0, limiteFiche).map(l => {
-      const paye = couverture[l.id];
-      const pastille = l.paid === false ? '<span class="paye offert" title="Cours offert">✦</span>'
-        : paye ? '<span class="paye oui" title="Payé">✓</span>'
-          : '<span class="paye non" title="En attente de règlement"></span>';
+      const pastille = pastillePaiement(l, couverture[l.id], false);
       return `<div class="card tappable row" data-lesson="${l.id}"><div class="lesson-time">${fmtDate(l.date)}</div>
       <div class="grow sub">${esc(l.type || '')}${l.lieu === 'domicile' ? ' · à domicile' : ''}${l.note ? ' — ' + esc(l.note) : ''}</div>
       ${pastille}</div>`;
@@ -2015,6 +2019,15 @@ async function renderStudentDetail(id) {
 }
 
 // Récupère la description, en reprenant les anciens champs s'ils existent
+// Pastille de règlement : ✦ offert, ✓ couvert par un paiement, ○ reste dû.
+function pastillePaiement(l, couvert, provisoire) {
+  if (l.paid === false) return '<span class="paye offert" title="Cours offert">✦</span>';
+  const p = provisoire ? ' provisoire' : '';
+  return couvert
+    ? `<span class="paye oui${p}" title="${provisoire ? 'Couvert par le forfait — à valider' : 'Payé'}">✓</span>`
+    : `<span class="paye non${p}" title="${provisoire ? 'Pas encore couvert — à valider' : 'En attente de règlement'}"></span>`;
+}
+
 function descriptionOf(s) {
   if (s.description !== undefined && s.description !== null) return s.description;
   const vieux = [
